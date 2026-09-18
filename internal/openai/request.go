@@ -398,7 +398,7 @@ func appendResponsesInputItem(out *[]codex.InputItem, instructions *[]string, to
 			Type:  "additional_tools",
 			Role:  strings.TrimSpace(item.Role),
 			ID:    strings.TrimSpace(item.ID),
-			Tools: append([]codex.Tool(nil), item.Tools...),
+			Tools: normalizeAdditionalTools(item.Tools),
 		})
 	default:
 		if item.Type != "" && item.Type != "message" {
@@ -411,6 +411,28 @@ func appendResponsesInputItem(out *[]codex.InputItem, instructions *[]string, to
 		return appendRoleContentInput(out, role, item.Phase, item.Content)
 	}
 	return nil
+}
+
+func normalizeAdditionalTools(tools []ToolDefinition) []codex.Tool {
+	if len(tools) == 0 {
+		return nil
+	}
+
+	result := make([]codex.Tool, len(tools))
+	copy(result, tools)
+	for index := range result {
+		if result[index].Type != "namespace" || strings.TrimSpace(result[index].Description) != "" {
+			continue
+		}
+
+		name := strings.TrimSpace(result[index].Name)
+		if name == "" {
+			result[index].Description = "Dynamic tool namespace"
+			continue
+		}
+		result[index].Description = "Tools in the " + name + " namespace."
+	}
+	return result
 }
 
 func appendInstructionText(instructions *[]string, content MessageContent) error {

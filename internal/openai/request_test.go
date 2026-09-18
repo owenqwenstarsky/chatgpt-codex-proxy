@@ -932,6 +932,35 @@ func TestResponsesTranslationPreservesAdditionalToolsInput(t *testing.T) {
 	}
 }
 
+func TestResponsesTranslationAddsMissingAdditionalToolsNamespaceDescription(t *testing.T) {
+	t.Parallel()
+
+	var request ResponsesRequest
+	if err := json.Unmarshal([]byte(`{
+		"model": "gpt-5.6-terra",
+		"input": [{
+			"type": "additional_tools",
+			"role": "developer",
+			"id": "at_123",
+			"tools": [{
+				"type": "namespace",
+				"name": "collaboration",
+				"tools": []
+			}]
+		}]
+	}`), &request); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	normalized, err := Responses(request, nil)
+	if err != nil {
+		t.Fatalf("Responses() error = %v", err)
+	}
+	if got := normalized.Input[0].Tools[0].Description; got != "Tools in the collaboration namespace." {
+		t.Fatalf("namespace description = %q, want fallback description", got)
+	}
+}
+
 func TestResponsesTranslationRejectsUnknownInputItemType(t *testing.T) {
 	t.Parallel()
 
