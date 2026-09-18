@@ -213,20 +213,21 @@ func (r *ResponsesInput) UnmarshalJSON(data []byte) error {
 }
 
 type ResponsesInputItem struct {
-	Type             string          `json:"type,omitempty"`
-	Role             string          `json:"role,omitempty"`
-	Phase            string          `json:"phase,omitempty"`
-	Content          MessageContent  `json:"content,omitempty"`
-	CallID           string          `json:"call_id,omitempty"`
-	OutputText       string          `json:"-"`
-	OutputContent    MessageContent  `json:"-"`
-	Name             string          `json:"name,omitempty"`
-	Input            string          `json:"input,omitempty"`
-	Arguments        string          `json:"arguments,omitempty"`
-	ID               string          `json:"id,omitempty"`
-	Status           string          `json:"status,omitempty"`
-	Summary          []ReasoningPart `json:"summary,omitempty"`
-	EncryptedContent string          `json:"encrypted_content,omitempty"`
+	Type             string           `json:"type,omitempty"`
+	Role             string           `json:"role,omitempty"`
+	Phase            string           `json:"phase,omitempty"`
+	Content          MessageContent   `json:"content,omitempty"`
+	Tools            []ToolDefinition `json:"tools,omitempty"`
+	CallID           string           `json:"call_id,omitempty"`
+	OutputText       string           `json:"-"`
+	OutputContent    MessageContent   `json:"-"`
+	Name             string           `json:"name,omitempty"`
+	Input            string           `json:"input,omitempty"`
+	Arguments        string           `json:"arguments,omitempty"`
+	ID               string           `json:"id,omitempty"`
+	Status           string           `json:"status,omitempty"`
+	Summary          []ReasoningPart  `json:"summary,omitempty"`
+	EncryptedContent string           `json:"encrypted_content,omitempty"`
 }
 
 func (r *ResponsesInputItem) UnmarshalJSON(data []byte) error {
