@@ -131,6 +131,35 @@ func TestParseQuotaFromEvent(t *testing.T) {
 	}
 }
 
+func TestQuotaFromUsageResponseKeepsOverallStateOffIndividualWindows(t *testing.T) {
+	t.Parallel()
+
+	payload := UsageResponse{PlanType: "plus"}
+	payload.RateLimit.Allowed = false
+	payload.RateLimit.LimitReached = true
+	payload.RateLimit.PrimaryWindow = &UsageWindow{
+		UsedPercent:        0,
+		LimitWindowSeconds: 18000,
+		ResetAt:            time.Now().UTC().Add(5 * time.Hour).Unix(),
+	}
+	payload.RateLimit.SecondaryWindow = &UsageWindow{
+		UsedPercent:        100,
+		LimitWindowSeconds: 604800,
+		ResetAt:            time.Now().UTC().Add(7 * 24 * time.Hour).Unix(),
+	}
+
+	snapshot := QuotaFromUsageResponse(payload)
+	if !snapshot.RateLimit.Allowed {
+		t.Fatal("primary allowed = false, want true for an unused window")
+	}
+	if snapshot.RateLimit.LimitReached {
+		t.Fatal("primary limit_reached = true, want false for an unused window")
+	}
+	if snapshot.SecondaryRateLimit == nil || !snapshot.SecondaryRateLimit.LimitReached {
+		t.Fatalf("secondary = %#v, want exhausted window", snapshot.SecondaryRateLimit)
+	}
+}
+
 func TestUsageResponseIgnoresCodeReviewSecondaryWindow(t *testing.T) {
 	t.Parallel()
 
