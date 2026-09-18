@@ -393,7 +393,17 @@ func appendResponsesInputItem(out *[]codex.InputItem, instructions *[]string, to
 			ID:               strings.TrimSpace(item.ID),
 			EncryptedContent: strings.TrimSpace(item.EncryptedContent),
 		})
+	case "additional_tools":
+		*out = append(*out, codex.InputItem{
+			Type:  "additional_tools",
+			Role:  strings.TrimSpace(item.Role),
+			ID:    strings.TrimSpace(item.ID),
+			Tools: append([]codex.Tool(nil), item.Tools...),
+		})
 	default:
+		if item.Type != "" && item.Type != "message" {
+			return fmt.Errorf("unsupported response input item type %q", item.Type)
+		}
 		role := item.Role
 		if role == "" {
 			role = "user"
