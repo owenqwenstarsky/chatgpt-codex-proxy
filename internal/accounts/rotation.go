@@ -16,9 +16,14 @@ func selectRoundRobin(candidates []*Record, index *int) *Record {
 
 func selectLeastUsed(candidates []*Record, index *int) *Record {
 	withQuota := make([]*Record, 0, len(candidates))
+	withWindowDurations := make([]*Record, 0, len(candidates))
 	for _, candidate := range candidates {
-		if candidate != nil && candidate.CachedQuota != nil && candidate.CachedQuota.RateLimit.UsedPercent != nil {
-			withQuota = append(withQuota, candidate)
+		if candidate == nil || candidate.CachedQuota == nil || candidate.CachedQuota.RateLimit.UsedPercent == nil {
+			continue
+		}
+		withQuota = append(withQuota, candidate)
+		if len(rateLimitWindowsByDuration(candidate.CachedQuota)) > 0 {
+			withWindowDurations = append(withWindowDurations, candidate)
 		}
 	}
 
@@ -26,12 +31,21 @@ func selectLeastUsed(candidates []*Record, index *int) *Record {
 		return selectRoundRobin(candidates, index)
 	}
 
+	var sharedDurations []int
+	if len(withWindowDurations) > 0 {
+		withQuota = withWindowDurations
+		sharedDurations = sharedRateLimitWindowDurations(withQuota)
+		if len(sharedDurations) == 0 {
+			return selectRoundRobin(withQuota, index)
+		}
+	}
+
 	slices.SortFunc(withQuota, func(a, b *Record) int {
-		return cmp.Or(compareLeastUsedQuota(a, b), strings.Compare(a.ID, b.ID))
+		return cmp.Or(compareLeastUsedQuota(a, b, sharedDurations), strings.Compare(a.ID, b.ID))
 	})
 
 	tiedCount := 1
-	for tiedCount < len(withQuota) && compareLeastUsedQuota(withQuota[0], withQuota[tiedCount]) == 0 {
+	for tiedCount < len(withQuota) && compareLeastUsedQuota(withQuota[0], withQuota[tiedCount], sharedDurations) == 0 {
 		tiedCount++
 	}
 	selected := withQuota[*index%tiedCount]
@@ -39,10 +53,36 @@ func selectLeastUsed(candidates []*Record, index *int) *Record {
 	return selected
 }
 
-func compareLeastUsedQuota(a, b *Record) int {
-	aQuota := a.CachedQuota
-	bQuota := b.CachedQuota
+func compareLeastUsedQuota(a, b *Record, sharedDurations []int) int {
+	if len(sharedDurations) == 0 {
+		return compareLegacyLeastUsedQuota(a.CachedQuota, b.CachedQuota)
+	}
 
+	aWindows := rateLimitWindowsByDuration(a.CachedQuota)
+	bWindows := rateLimitWindowsByDuration(b.CachedQuota)
+	for _, duration := range sharedDurations {
+		aPercent := *aWindows[duration].UsedPercent
+		bPercent := *bWindows[duration].UsedPercent
+		switch {
+		case aPercent < bPercent:
+			return -1
+		case aPercent > bPercent:
+			return 1
+		}
+	}
+	for _, duration := range sharedDurations {
+		aReset := aWindows[duration].ResetAt
+		bReset := bWindows[duration].ResetAt
+		if aReset != nil && bReset != nil {
+			if order := aReset.UTC().Compare(bReset.UTC()); order != 0 {
+				return order
+			}
+		}
+	}
+	return 0
+}
+
+func compareLegacyLeastUsedQuota(aQuota, bQuota *QuotaSnapshot) int {
 	aPrimary := primaryPercent(aQuota)
 	bPrimary := primaryPercent(bQuota)
 	switch {
@@ -70,6 +110,43 @@ func compareLeastUsedQuota(a, b *Record) int {
 	}
 
 	return 0
+}
+
+func rateLimitWindowsByDuration(snapshot *QuotaSnapshot) map[int]*RateLimitWindow {
+	windows := make(map[int]*RateLimitWindow, 2)
+	if snapshot == nil {
+		return windows
+	}
+	for _, window := range []*RateLimitWindow{&snapshot.RateLimit, snapshot.SecondaryRateLimit} {
+		if window == nil || window.UsedPercent == nil || window.LimitWindowSeconds == nil || *window.LimitWindowSeconds <= 0 {
+			continue
+		}
+		if _, exists := windows[*window.LimitWindowSeconds]; !exists {
+			windows[*window.LimitWindowSeconds] = window
+		}
+	}
+	return windows
+}
+
+func sharedRateLimitWindowDurations(records []*Record) []int {
+	if len(records) == 0 {
+		return nil
+	}
+	shared := rateLimitWindowsByDuration(records[0].CachedQuota)
+	for _, record := range records[1:] {
+		windows := rateLimitWindowsByDuration(record.CachedQuota)
+		for duration := range shared {
+			if _, ok := windows[duration]; !ok {
+				delete(shared, duration)
+			}
+		}
+	}
+	durations := make([]int, 0, len(shared))
+	for duration := range shared {
+		durations = append(durations, duration)
+	}
+	slices.Sort(durations)
+	return durations
 }
 
 func primaryPercent(snapshot *QuotaSnapshot) float64 {

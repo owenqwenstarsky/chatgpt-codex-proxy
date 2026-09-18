@@ -218,14 +218,18 @@ The strategy falls back to `round_robin` across eligible accounts.
 
 ### Step 3: Rank eligible accounts that have usable cached quota
 
-The comparator is applied in this exact order:
+When quota windows include `limit_window_seconds`, the proxy first keeps accounts with that duration metadata and finds the window durations shared by all of them. It compares those matching durations from shortest to longest:
 
-1. Lower primary `used_percent`
-2. Lower secondary `used_percent`, but only when both accounts have secondary values
-3. Earlier primary `reset_at`, but only when both accounts have primary reset values
-4. If still tied, they are treated as equal-best candidates and the proxy round-robins among the tied subset
+1. Lower `used_percent` for the shortest shared duration
+2. Lower `used_percent` for each longer shared duration
+3. Earlier `reset_at` for those same durations, in the same order
+4. If still tied, round-robin among the tied subset
 
-Accounts without usable cached quota are not compared against the ranked group at all. They are fallback candidates only, behind all eligible accounts that have primary `used_percent`.
+The primary or secondary position of a window does not affect matching. For example, a 7-day primary window is compared with another account's 7-day secondary window, not with its 5-hour primary window.
+
+If duration metadata is present but the accounts have no shared window duration, the proxy round-robins rather than comparing unlike quotas. Cached snapshots without any duration metadata retain the legacy positional order (primary usage, secondary usage, then primary reset).
+
+Accounts without usable cached quota are not compared against the ranked group at all. They are fallback candidates only, behind eligible accounts with comparable quota data.
 
 ### Important details
 
@@ -235,38 +239,39 @@ Accounts without usable cached quota are not compared against the ranked group a
 - Token counts are ignored
 - `last_error` is ignored unless it corresponds to current ineligibility through cooldown or permanent status
 
-### Example 1: Lower primary usage wins
+### Example 1: Lower usage in a matching window wins
 
 Eligible accounts:
 
-- `acct_a`: primary `used_percent = 78`
-- `acct_b`: primary `used_percent = 32`
+- `acct_a`: primary 5-hour `used_percent = 78`, secondary 7-day `used_percent = 15`
+- `acct_b`: primary 7-day `used_percent = 32`
 
 Selection:
 
-- `acct_b` wins because `32 < 78`
+- `acct_a` wins because its 7-day usage is `15`, compared with `acct_b`'s matching 7-day usage of `32`
+- `acct_a`'s 5-hour value is not compared with `acct_b`'s 7-day value
 
-### Example 2: Primary tie, secondary breaks the tie
+### Example 2: A longer shared window breaks a tie
 
 Eligible accounts:
 
-- `acct_a`: primary `50`, secondary `80`
-- `acct_b`: primary `50`, secondary `20`
+- `acct_a`: 5-hour `50`, 7-day `80`
+- `acct_b`: 5-hour `50`, 7-day `20`
 
 Selection:
 
-- `acct_b` wins because the primary usage is tied and secondary usage is lower
+- `acct_b` wins because the 5-hour usage is tied and its 7-day usage is lower
 
-### Example 3: Primary and secondary tie, earlier reset wins
+### Example 3: Usage ties, earlier matching reset wins
 
 Eligible accounts:
 
-- `acct_a`: primary `70`, reset at `12:30`
-- `acct_b`: primary `70`, reset at `12:10`
+- `acct_a`: 5-hour `70`, reset at `12:30`
+- `acct_b`: 5-hour `70`, reset at `12:10`
 
 Selection:
 
-- `acct_b` wins because the primary reset is earlier
+- `acct_b` wins because the matching 5-hour reset is earlier
 
 ### Example 4: Exact tie
 
