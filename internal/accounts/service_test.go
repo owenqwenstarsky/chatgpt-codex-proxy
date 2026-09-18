@@ -42,6 +42,53 @@ func TestLeastUsedPrefersLowerPrimaryUsedPercent(t *testing.T) {
 	}
 }
 
+func TestLeastUsedComparesMatchingWindowDurations(t *testing.T) {
+	t.Parallel()
+
+	const (
+		fiveHours = 5 * 60 * 60
+		oneWeek   = 7 * 24 * 60 * 60
+	)
+	weeklyLight := recordWithQuota("acct_weekly_light", 81, nil)
+	weeklyLight.CachedQuota.RateLimit.LimitWindowSeconds = intPointer(oneWeek)
+
+	weeklyBusyPercent := 90.0
+	shortLight := recordWithQuota("acct_short_light", 10, &weeklyBusyPercent)
+	shortLight.CachedQuota.RateLimit.LimitWindowSeconds = intPointer(fiveHours)
+	shortLight.CachedQuota.SecondaryRateLimit.LimitWindowSeconds = intPointer(oneWeek)
+
+	svc := newTestService(t, RotationLeastUsed, weeklyLight, shortLight)
+	record, err := svc.Acquire("")
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	if record.ID != "acct_weekly_light" {
+		t.Fatalf("Acquire() = %q, want acct_weekly_light based on weekly quota", record.ID)
+	}
+}
+
+func TestLeastUsedRoundRobinsWhenWindowDurationsDoNotMatch(t *testing.T) {
+	t.Parallel()
+
+	weekly := recordWithQuota("acct_a_weekly", 81, nil)
+	weekly.CachedQuota.RateLimit.LimitWindowSeconds = intPointer(7 * 24 * 60 * 60)
+	short := recordWithQuota("acct_b_short", 10, nil)
+	short.CachedQuota.RateLimit.LimitWindowSeconds = intPointer(5 * 60 * 60)
+
+	svc := newTestService(t, RotationLeastUsed, weekly, short)
+	first, err := svc.Acquire("")
+	if err != nil {
+		t.Fatalf("Acquire(first) error = %v", err)
+	}
+	second, err := svc.Acquire("")
+	if err != nil {
+		t.Fatalf("Acquire(second) error = %v", err)
+	}
+	if first.ID != "acct_a_weekly" || second.ID != "acct_b_short" {
+		t.Fatalf("round-robin order = %q, %q; want acct_a_weekly, acct_b_short", first.ID, second.ID)
+	}
+}
+
 func TestLeastUsedUsesSecondaryUsedPercentAsTieBreaker(t *testing.T) {
 	t.Parallel()
 
@@ -576,6 +623,10 @@ func recordWithQuota(id string, primary float64, secondary *float64) *Record {
 		}
 	}
 	return record
+}
+
+func intPointer(value int) *int {
+	return &value
 }
 
 type testJWTClaims struct {
