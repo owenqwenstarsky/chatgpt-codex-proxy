@@ -195,6 +195,48 @@ func TestResponsesWebSocketFailsOverBeforeFirstVisibleEvent(t *testing.T) {
 	}
 }
 
+func TestResponsesWebSocketFailsOverOnConnectionErrorBeforeFirstVisibleEvent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	success := &fakeResponsesWebSocketStream{turns: [][]*codex.StreamEvent{
+		responsesWebSocketTextEvents("resp_ws_connect_failover", "gpt-5.6-terra", "recovered"),
+	}}
+	app := newResponsesWebSocketTestApp(t, success)
+	if _, err := app.accounts.UpsertFromToken("upstream_ws_b", accounts.OAuthToken{AccessToken: "token-b", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatalf("UpsertFromToken() error = %v", err)
+	}
+	connects := 0
+	app.wsConnector = func(_ context.Context, _ string, _ http.Header, body any) (responsesWebSocketStream, error) {
+		connects++
+		if connects == 1 {
+			return nil, codex.NewUpstreamError("websocket dial", http.StatusServiceUnavailable, "temporarily unavailable", nil)
+		}
+		success.mu.Lock()
+		success.connects++
+		success.mu.Unlock()
+		if err := success.begin(body); err != nil {
+			return nil, err
+		}
+		return success, nil
+	}
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	conn, _, err := websocket.DefaultDialer.Dial(websocketTestURL(server.URL)+"/v1/responses", http.Header{"Authorization": []string{"Bearer test-key"}})
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	if err := conn.WriteJSON(map[string]any{"type": "response.create", "model": "gpt-5.6-terra", "input": "recover"}); err != nil {
+		t.Fatalf("WriteJSON() error = %v", err)
+	}
+	events := readResponsesWebSocketTurn(t, conn)
+	assertResponsesWebSocketEventTypes(t, events, "response.created", "response.output_text.delta", "response.completed")
+	if connects != 2 || success.connects != 1 {
+		t.Fatalf("upstream connects = total %d, successful %d; want two attempts and one successful connection", connects, success.connects)
+	}
+}
+
 func TestResponsesWebSocketContinuesAfterIncompleteResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
