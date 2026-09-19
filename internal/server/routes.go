@@ -24,6 +24,7 @@ func (a *App) routes() {
 		middleware.SetRequestError(c, "invalid_api_key", "invalid_api_key")
 		c.AbortWithStatusJSON(http.StatusUnauthorized, middleware.OpenAIErrorPayload("invalid_api_key", "authentication_error", "invalid_api_key", ""))
 	}))
+	protected.Use(middleware.RequestActivity(a.activity, a.logger))
 	protected.GET("/health", a.handleHealth)
 	protected.GET("/v1/models", a.handleModels)
 	protected.GET("/v1/models/:model_id", a.handleModelByID)
@@ -47,4 +48,8 @@ func (a *App) routes() {
 	adminGroup.POST("/accounts/:account_id/refresh", a.handleAdminAccountRefresh)
 	adminGroup.GET("/rotation", a.handleAdminRotationGet)
 	adminGroup.PUT("/rotation", a.handleAdminRotationPut)
+	adminGroup.GET("/requests/activity", a.handleAdminRequestActivity)
+	adminGroup.GET("/requests/activity/stream", a.handleAdminRequestActivityStream)
+	adminGroup.GET("/requests/logs/dates", a.handleAdminRequestLogDates)
+	adminGroup.GET("/requests/logs", a.handleAdminRequestLogs)
 }

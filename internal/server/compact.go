@@ -32,6 +32,7 @@ func (a *App) handleResponsesCompact(c *gin.Context) {
 		a.respondOpenAINormalizeError(c, err)
 		return
 	}
+	middleware.SetRequestActivityModel(c, normalized.Model)
 
 	normalized, preferredAccountID, err := a.resolveCompactRequest(normalized)
 	if err != nil {
@@ -58,6 +59,7 @@ func (a *App) handleResponsesCompact(c *gin.Context) {
 		return
 	}
 	a.setRequestAccount(c, account)
+	middleware.SetRequestActivityModel(c, normalized.Model)
 
 	a.observeQuotaSnapshot(account.ID, quota)
 	a.accounts.NoteSuccess(account.ID)
@@ -66,6 +68,7 @@ func (a *App) handleResponsesCompact(c *gin.Context) {
 	if err := openai.PatchResponsesObjectForTuple(response, normalized.TupleSchema); err != nil {
 		a.logTupleReconversionWarning(c, "responses_compact", jsonutil.StringValue(response["id"]), err)
 	}
+	middleware.SetRequestActivityFinalizing(c)
 	c.JSON(http.StatusOK, response)
 }
 

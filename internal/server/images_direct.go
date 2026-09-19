@@ -17,6 +17,7 @@ import (
 	"chatgpt-codex-proxy/internal/accounts"
 	"chatgpt-codex-proxy/internal/codex"
 	"chatgpt-codex-proxy/internal/jsonutil"
+	"chatgpt-codex-proxy/internal/middleware"
 	"chatgpt-codex-proxy/internal/turn"
 )
 
@@ -107,6 +108,7 @@ func (a *App) handleDirectImageResponse(c *gin.Context, endpoint, path string, p
 		if contentType == "" {
 			contentType = "application/json"
 		}
+		middleware.SetRequestActivityFinalizing(c)
 		c.Data(http.StatusOK, contentType, body)
 	}
 	a.accounts.NoteSuccess(account.ID)

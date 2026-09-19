@@ -11,6 +11,7 @@ import (
 	"chatgpt-codex-proxy/internal/accountmanager"
 	"chatgpt-codex-proxy/internal/accounts"
 	"chatgpt-codex-proxy/internal/accounts/jsonstore"
+	"chatgpt-codex-proxy/internal/activity"
 	"chatgpt-codex-proxy/internal/anthropic"
 	"chatgpt-codex-proxy/internal/codex"
 	"chatgpt-codex-proxy/internal/codexauth"
@@ -38,6 +39,7 @@ type App struct {
 	continuations   *conversation.ContinuationManager
 	claudeReplays   *anthropic.ReplayManager
 	models          *models.Catalog
+	activity        *activity.Store
 	cancel          context.CancelFunc
 }
 
@@ -61,6 +63,10 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 	accountMgr := accountmanager.NewAccountManager(cfg, accountsSvc, oauthSvc, httpClient, modelCatalog.SupportsRecord)
 	deviceLogins := devicelogin.NewDeviceLoginService(oauthSvc, accountsSvc, cfg.LoginTimeout)
 	modelRefresher := models.NewFetcher(cfg, logger, accountsSvc, accountMgr, httpClient, modelCatalog)
+	activityStore, err := activity.NewStore(cfg.DataDir)
+	if err != nil {
+		return nil, err
+	}
 
 	engine := gin.New()
 	engine.SetTrustedProxies(nil)
@@ -79,6 +85,7 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 		continuations: conversation.NewContinuationManager(cfg.ContinuationTTL),
 		claudeReplays: anthropic.NewReplayManager(cfg.ContinuationTTL),
 		models:        modelCatalog,
+		activity:      activityStore,
 	}
 	app.routes()
 
@@ -114,6 +121,7 @@ func (a *App) housekeeping(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-sweeps:
+			a.activity.Sweep(time.Now().UTC())
 			a.continuations.Sweep()
 			a.accounts.SweepThreadAffinities()
 			a.claudeReplays.Sweep()

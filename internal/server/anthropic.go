@@ -40,6 +40,7 @@ func (a *App) handleAnthropicCountTokens(c *gin.Context) {
 		a.respondAnthropicNormalizeError(c, err)
 		return
 	}
+	middleware.SetRequestActivityModel(c, normalized.Model)
 	count, err := anthropic.CountInputTokens(normalized)
 	if err != nil {
 		a.writeAnthropicError(c, http.StatusInternalServerError, err.Error())
@@ -94,6 +95,7 @@ func (a *App) handleAnthropicMessages(c *gin.Context) {
 		return
 	}
 	a.setRequestAccount(c, account)
+	middleware.SetRequestActivityModel(c, resolution.Request.Model)
 	a.observeQuotaSnapshot(account.ID, quota)
 	defer stream.Close()
 
@@ -107,6 +109,7 @@ func (a *App) handleAnthropicMessages(c *gin.Context) {
 		return
 	}
 	a.claudeReplays.Remember(replayScope, request.Model, account.ID, accumulator)
+	middleware.SetRequestActivityFinalizing(c)
 	c.JSON(http.StatusOK, anthropic.BuildMessage(accumulator))
 }
 

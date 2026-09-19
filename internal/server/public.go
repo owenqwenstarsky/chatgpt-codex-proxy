@@ -110,6 +110,7 @@ func (a *App) handlePublicRequest(
 		a.respondOpenAINormalizeError(c, err)
 		return
 	}
+	middleware.SetRequestActivityModel(c, normalized.Model)
 
 	opened, ok := a.resolveAndOpenRequest(c, endpoint, normalized)
 	if !ok {
@@ -131,6 +132,7 @@ func (a *App) handlePublicRequest(
 	if err := patchTuple(response, normalized.TupleSchema); err != nil {
 		a.logTupleReconversionWarning(c, endpoint, accumulator.ResponseID, err)
 	}
+	middleware.SetRequestActivityFinalizing(c)
 	c.JSON(http.StatusOK, response)
 }
 
@@ -163,6 +165,7 @@ func (a *App) resolveAndOpenRequest(c *gin.Context, endpoint string, normalized 
 	}
 
 	a.setRequestAccount(c, account)
+	middleware.SetRequestActivityModel(c, resolution.Request.Model)
 	if key := strings.TrimSpace(resolution.ConversationKey); key != "" {
 		c.Set(stickyThreadConversationKey, key)
 	}
@@ -640,6 +643,7 @@ func normalizeResponsesBody(body []byte, catalog *models.Catalog) (turn.Normaliz
 }
 
 func prepareStreamResponse(c *gin.Context) {
+	middleware.SetRequestActivityStreaming(c)
 	headers := c.Writer.Header()
 	headers.Set("Content-Type", "text/event-stream")
 	headers.Set("Cache-Control", "no-cache, no-transform")
@@ -843,6 +847,7 @@ func (a *App) setRequestAccount(c *gin.Context, account accounts.Record) {
 		return
 	}
 	c.Set(middleware.RequestAccountIDKey, account.ID)
+	middleware.SetRequestActivityAccount(c, account.ID, account.Label)
 	if account.AccountID != "" {
 		c.Set(middleware.RequestUpstreamAccountIDKey, account.AccountID)
 	}
