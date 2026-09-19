@@ -9,6 +9,7 @@ import (
 	"chatgpt-codex-proxy/internal/accounts"
 	"chatgpt-codex-proxy/internal/codex"
 	"chatgpt-codex-proxy/internal/jsonutil"
+	"chatgpt-codex-proxy/internal/middleware"
 	"chatgpt-codex-proxy/internal/turn"
 )
 
@@ -29,6 +30,9 @@ func (a *App) streamResponses(c *gin.Context, account accounts.Record, normalize
 			}
 			a.respondStreamError(c, "responses", account.ID, accumulator.ResponseID, "error", err, upstreamErr)
 			return
+		}
+		if event.IsTerminalResponse() {
+			middleware.MarkActivityFinalizing(c)
 		}
 		for _, outgoing := range a.responsesStreamEvents(c, accumulator, normalized, &tupleTextBuffer, event) {
 			writeSSE(c.Writer, outgoing.Type, turn.ResponseEventJSON(outgoing.Type, accumulator.ResponseID, outgoing.Payload))

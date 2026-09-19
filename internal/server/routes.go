@@ -18,10 +18,12 @@ func (a *App) routes() {
 		if strings.TrimSpace(c.GetHeader("anthropic-version")) != "" || strings.HasPrefix(c.Request.URL.Path, "/v1/messages") {
 			a.prepareAnthropicHeaders(c)
 			middleware.SetRequestError(c, "authentication_error", "invalid x-api-key")
+			middleware.MarkActivityFinalizing(c)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, anthropic.ErrorPayload("authentication_error", "invalid x-api-key", middleware.GetRequestID(c)))
 			return
 		}
 		middleware.SetRequestError(c, "invalid_api_key", "invalid_api_key")
+		middleware.MarkActivityFinalizing(c)
 		c.AbortWithStatusJSON(http.StatusUnauthorized, middleware.OpenAIErrorPayload("invalid_api_key", "authentication_error", "invalid_api_key", ""))
 	}))
 	protected.GET("/health", a.handleHealth)
@@ -47,4 +49,8 @@ func (a *App) routes() {
 	adminGroup.POST("/accounts/:account_id/refresh", a.handleAdminAccountRefresh)
 	adminGroup.GET("/rotation", a.handleAdminRotationGet)
 	adminGroup.PUT("/rotation", a.handleAdminRotationPut)
+	adminGroup.GET("/requests/activity", a.handleRequestActivity)
+	adminGroup.GET("/requests/activity/stream", a.handleRequestActivityStream)
+	adminGroup.GET("/requests/logs/dates", a.handleRequestLogDates)
+	adminGroup.GET("/requests/logs", a.handleRequestLogs)
 }

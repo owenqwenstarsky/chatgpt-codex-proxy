@@ -32,6 +32,7 @@ Built for local and small-scale use.
 - **Multi-account rotation** — least-used, round-robin, sticky, or sticky-thread, with cooldowns and quota awareness.
 - **Device login** — add an account by opening a URL. No cookie scraping, no pasted tokens.
 - **Tools and structured output** — custom tools, legacy `functions`, `json_schema`, `json_object`.
+- **Activity and Logbook telemetry** — live request phases over authenticated SSE plus 30 days of redacted daily history.
 
 ## Quick Start
 
@@ -142,6 +143,33 @@ keeps it active behind a 60-second cooldown.
 
 Details: [docs/MULTI_ACCOUNT_ROTATION_STRATEGY.md](docs/MULTI_ACCOUNT_ROTATION_STRATEGY.md).
 
+## Activity and Logbook
+
+The authenticated admin API exposes live inference-request metadata and durable
+daily history:
+
+```
+GET /admin/requests/activity
+GET /admin/requests/activity/stream
+GET /admin/requests/logs/dates
+GET /admin/requests/logs?date=YYYY-MM-DD
+```
+
+The stream starts with a named `snapshot` event, then sends named `upsert` and
+`remove` events plus a comment heartbeat every 15 seconds. Completed requests
+remain in the live Activity window for approximately 60 seconds.
+
+Logbook supports `limit`, `cursor`, `q`, `outcome`, `account`, and `model`
+filters. Daily files are written as `${DATA_DIR}/request-YYYY-MM-DD.jsonl` using
+the request's UTC start date and are retained for 30 UTC days.
+
+Activity data is deliberately metadata-only: request and response bodies,
+prompts, tool data, images, files, headers, tokens, cookies, client addresses,
+user agents, query strings, upstream error bodies, and stack traces are never
+stored or streamed. Records contain only request identity, route, model,
+selected account metadata, lifecycle phase/outcome, timing, status, and safe
+allowlisted failure classifications.
+
 ## Deployment
 
 `compose.yaml` persists state in the `chatgpt-codex-proxy-data` volume and runs
@@ -158,8 +186,9 @@ and `STICKY_THREAD_TTL` (`30m`). `RATE_LIMIT_MAX_WAIT` is a positive duration
 and defaults to `2m`.
 
 `${DATA_DIR}` holds `accounts.json` — accounts, OAuth tokens, labels, status,
-quota, cooldowns — and `models-cache.json`. Continuation state and in-flight
-device logins are memory-only and do not survive a restart.
+quota, cooldowns — `models-cache.json`, and redacted `request-YYYY-MM-DD.jsonl`
+Logbook files. Continuation state, live Activity state, and in-flight device
+logins are memory-only and do not survive a restart.
 
 ## How It Works
 

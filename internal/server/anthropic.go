@@ -40,6 +40,7 @@ func (a *App) handleAnthropicCountTokens(c *gin.Context) {
 		a.respondAnthropicNormalizeError(c, err)
 		return
 	}
+	middleware.SetActivityModel(c, normalized.Model)
 	count, err := anthropic.CountInputTokens(normalized)
 	if err != nil {
 		a.writeAnthropicError(c, http.StatusInternalServerError, err.Error())
@@ -64,6 +65,7 @@ func (a *App) handleAnthropicMessages(c *gin.Context) {
 		a.respondAnthropicNormalizeError(c, err)
 		return
 	}
+	middleware.SetActivityModel(c, normalized.Model)
 
 	resolution := sessionResolution{
 		Request:            normalized,
@@ -80,6 +82,7 @@ func (a *App) handleAnthropicMessages(c *gin.Context) {
 				a.respondAnthropicNormalizeError(c, normalizeErr)
 				return
 			}
+			middleware.SetActivityModel(c, normalized.Model)
 			resolution = sessionResolution{
 				Request:            normalized,
 				Original:           normalized,
@@ -107,6 +110,7 @@ func (a *App) handleAnthropicMessages(c *gin.Context) {
 		return
 	}
 	a.claudeReplays.Remember(replayScope, request.Model, account.ID, accumulator)
+	middleware.MarkActivityFinalizing(c)
 	c.JSON(http.StatusOK, anthropic.BuildMessage(accumulator))
 }
 
@@ -157,6 +161,9 @@ func (a *App) streamAnthropicMessage(c *gin.Context, account accounts.Record, no
 			return
 		}
 		for _, outgoing := range encoder.Events(event, accumulator) {
+			if event.IsTerminalResponse() {
+				middleware.MarkActivityFinalizing(c)
+			}
 			payload, marshalErr := json.Marshal(outgoing)
 			if marshalErr != nil {
 				a.writeAnthropicStreamError(c, account.ID, accumulator.ResponseID, marshalErr, false)
@@ -246,6 +253,7 @@ func (a *App) writeAnthropicError(c *gin.Context, status int, message string) {
 	errorType := anthropic.ErrorTypeForStatus(status)
 	message = strings.TrimSpace(message)
 	middleware.SetRequestError(c, errorType, message)
+	middleware.MarkActivityFinalizing(c)
 	c.AbortWithStatusJSON(status, anthropic.ErrorPayload(errorType, message, middleware.GetRequestID(c)))
 }
 
@@ -269,6 +277,7 @@ func (a *App) writeAnthropicStreamError(c *gin.Context, accountID, responseID st
 	middleware.SetRequestOutcome(c, "upstream_error")
 	middleware.SetRequestError(c, errorType, message)
 	middleware.SetRequestResponseID(c, responseID)
+	middleware.MarkActivityFinalizing(c)
 	payload, _ := json.Marshal(anthropic.ErrorPayload(errorType, message, middleware.GetRequestID(c)))
 	writeSSE(c.Writer, "error", payload)
 	c.Writer.Flush()
