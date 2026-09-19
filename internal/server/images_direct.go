@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -116,13 +117,22 @@ func (a *App) openDirectImageWithFailover(ctx context.Context, c *gin.Context, e
 	attempted := make(map[string]struct{})
 	var lastAccount accounts.Record
 	var lastErr error
+	started := time.Now().UTC()
+	attemptCount := 0
 	for {
+		attemptCount++
 		account, err := a.accounts.AcquireMatching("", func(record accounts.Record) bool {
 			_, alreadyAttempted := attempted[record.ID]
 			return !alreadyAttempted
 		})
 		if err != nil {
-			if lastErr != nil && strings.Contains(strings.ToLower(err.Error()), "no active accounts") {
+			if retry, recoveryErr := a.waitForCapacityRecovery(ctx, endpoint, started, attemptCount, nil); recoveryErr != nil {
+				return lastAccount, nil, recoveryErr
+			} else if retry {
+				clear(attempted)
+				continue
+			}
+			if lastErr != nil {
 				return lastAccount, nil, lastErr
 			}
 			return account, nil, err

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -41,21 +42,12 @@ func (a *App) handleResponsesCompact(c *gin.Context) {
 		return
 	}
 
-	account, err := a.acquireAccountForCompact(c.Request.Context(), preferredAccountID, &normalized)
+	account, upstream, quota, err := a.callCompactWithRecovery(c, c.Request.Context(), preferredAccountID, &normalized)
 	if err != nil {
-		a.handleOpenStreamError(c, "responses_compact", "", preferredAccountID, err)
-		return
-	}
-	a.setRequestAccount(c, account)
-
-	payload := normalized.CompactRequest
-	a.logUpstreamPayload(c, "responses_compact", "http", account.ID, payload)
-	caller := a.compactCaller
-	if caller == nil {
-		caller = a.httpClient.CompactResponse
-	}
-	upstream, quota, err := caller(c.Request.Context(), account, payload)
-	if err != nil {
+		a.setRequestAccount(c, account)
+		if a.writeRateLimitRecoveryOpenAIError(c, err) {
+			return
+		}
 		if a.recordRequestCancellation(c, account.ID, "", err) {
 			return
 		}
@@ -65,6 +57,7 @@ func (a *App) handleResponsesCompact(c *gin.Context) {
 		a.writeOpenAIError(c, status, code, message, "api_error")
 		return
 	}
+	a.setRequestAccount(c, account)
 
 	a.observeQuotaSnapshot(account.ID, quota)
 	a.accounts.NoteSuccess(account.ID)
@@ -74,6 +67,53 @@ func (a *App) handleResponsesCompact(c *gin.Context) {
 		a.logTupleReconversionWarning(c, "responses_compact", jsonutil.StringValue(response["id"]), err)
 	}
 	c.JSON(http.StatusOK, response)
+}
+
+func (a *App) callCompactWithRecovery(c *gin.Context, ctx context.Context, preferredAccountID string, normalized *turn.NormalizedCompactRequest) (accounts.Record, codex.CompactResponse, *accounts.QuotaSnapshot, error) {
+	attempted := make(map[string]struct{})
+	var lastAccount accounts.Record
+	var lastErr error
+	started := time.Now().UTC()
+	attemptCount := 0
+	for {
+		attemptCount++
+		account, err := a.acquireAccountForCompactExcluding(ctx, preferredAccountID, normalized, attempted)
+		if err != nil {
+			allow := func(record accounts.Record) bool {
+				if _, tried := attempted[record.ID]; tried {
+					return false
+				}
+				return strings.TrimSpace(normalized.Model) == "" || a.modelCatalog().SupportsRecord(record, normalized.Model)
+			}
+			if retry, recoveryErr := a.waitForCapacityRecovery(ctx, "responses_compact", started, attemptCount, allow); recoveryErr != nil {
+				return lastAccount, codex.CompactResponse{}, nil, recoveryErr
+			} else if retry {
+				clear(attempted)
+				continue
+			}
+			if lastErr != nil {
+				return lastAccount, codex.CompactResponse{}, nil, lastErr
+			}
+			return account, codex.CompactResponse{}, nil, err
+		}
+		payload := normalized.CompactRequest
+		a.logUpstreamPayload(c, "responses_compact", "http", account.ID, payload)
+		caller := a.compactCaller
+		if caller == nil {
+			caller = a.httpClient.CompactResponse
+		}
+		upstream, quota, err := caller(ctx, account, payload)
+		err = normalizeRequestContextError(ctx, err)
+		if err == nil {
+			return account, upstream, quota, nil
+		}
+		if !isRateLimitCapacityFailure(err) {
+			return account, codex.CompactResponse{}, nil, err
+		}
+		a.classifyUpstreamError(account.ID, err)
+		attempted[account.ID] = struct{}{}
+		lastAccount, lastErr = account, err
+	}
 }
 
 func normalizeResponsesCompactBody(body []byte, catalog *models.Catalog) (turn.NormalizedCompactRequest, error) {
@@ -120,6 +160,31 @@ func (a *App) acquireAccountForCompact(ctx context.Context, preferredAccountID s
 		return account, nil
 	}
 	return a.accountMgr.AcquireReadyForModel(ctx, preferredAccountID, normalized.Model)
+}
+
+func (a *App) acquireAccountForCompactExcluding(ctx context.Context, preferredAccountID string, normalized *turn.NormalizedCompactRequest, attempted map[string]struct{}) (accounts.Record, error) {
+	allow := func(record accounts.Record) bool {
+		if _, tried := attempted[record.ID]; tried {
+			return false
+		}
+		return strings.TrimSpace(normalized.Model) == "" || a.modelCatalog().SupportsRecord(record, normalized.Model)
+	}
+	record, err := a.accounts.AcquireMatching(preferredAccountID, allow)
+	if err != nil {
+		return accounts.Record{}, err
+	}
+	ready, err := a.accountMgr.EnsureReady(ctx, record.ID)
+	if err != nil {
+		return record, err
+	}
+	if !normalized.ModelExplicit && strings.TrimSpace(normalized.Model) == "" {
+		modelID := a.modelCatalog().ResolveDefaultForRecord(ready, a.cfg.DefaultModel)
+		if strings.TrimSpace(modelID) == "" {
+			return accounts.Record{}, errContinuationAccountUnavailable
+		}
+		normalized.Model = modelID
+	}
+	return ready, nil
 }
 
 func compactResponseObject(upstream codex.CompactResponse) map[string]any {

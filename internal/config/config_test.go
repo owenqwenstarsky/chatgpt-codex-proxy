@@ -68,11 +68,38 @@ func TestLoadBuildsListenAddrAndDataDir(t *testing.T) {
 			if cfg.StickyThreadTTL != 30*time.Minute {
 				t.Fatalf("Load() sticky thread TTL = %s, want 30m", cfg.StickyThreadTTL)
 			}
+			if cfg.RateLimitMaxWait != 2*time.Minute {
+				t.Fatalf("Load() rate limit max wait = %s, want 2m", cfg.RateLimitMaxWait)
+			}
 			wantDataDir := filepath.Join(cwd, tc.wantData)
 			if cfg.DataDir != wantDataDir {
 				t.Fatalf("Load() data dir = %q, want %q", cfg.DataDir, wantDataDir)
 			}
 		})
+	}
+}
+
+func TestLoadParsesRateLimitMaxWait(t *testing.T) {
+	t.Setenv("PROXY_API_KEY", "test-key")
+	t.Setenv("RATE_LIMIT_MAX_WAIT", "45s")
+	t.Chdir(t.TempDir())
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.RateLimitMaxWait != 45*time.Second {
+		t.Fatalf("RateLimitMaxWait = %s, want 45s", cfg.RateLimitMaxWait)
+	}
+}
+
+func TestLoadRejectsInvalidRateLimitMaxWait(t *testing.T) {
+	t.Setenv("PROXY_API_KEY", "test-key")
+	t.Setenv("RATE_LIMIT_MAX_WAIT", "0s")
+	t.Chdir(t.TempDir())
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want invalid RATE_LIMIT_MAX_WAIT error")
 	}
 }
 

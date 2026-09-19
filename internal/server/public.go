@@ -213,8 +213,11 @@ func (a *App) openStreamWithFailover(c *gin.Context, ctx context.Context, endpoi
 	attempted := make(map[string]struct{})
 	var lastAccount accounts.Record
 	var lastErr error
+	started := time.Now().UTC()
+	attemptCount := 0
 	for {
 		account, stream, quota, err := open(c, ctx, endpoint, resolution, attempted)
+		attemptCount++
 		err = normalizeRequestContextError(ctx, err)
 		if err == nil {
 			prepared, prepareErr := a.prepareStreamForDelivery(ctx, account, stream, resolution.Request.Stream)
@@ -225,7 +228,13 @@ func (a *App) openStreamWithFailover(c *gin.Context, ctx context.Context, endpoi
 			err = prepareErr
 		}
 		if account.ID == "" {
-			if lastErr != nil && strings.Contains(strings.ToLower(err.Error()), "no active accounts") {
+			if retry, recoveryErr := a.waitForCapacityRecovery(ctx, endpoint, started, attemptCount, a.recoveryAllowForResolution(resolution)); recoveryErr != nil {
+				return lastAccount, nil, nil, recoveryErr
+			} else if retry {
+				clear(attempted)
+				continue
+			}
+			if lastErr != nil {
 				return lastAccount, nil, nil, lastErr
 			}
 			return account, nil, nil, err
@@ -240,7 +249,10 @@ func (a *App) openStreamWithFailover(c *gin.Context, ctx context.Context, endpoi
 				account.ID,
 				a.quotaCooldownUntil(account.ID, time.Now().UTC()),
 			)
-			return account, nil, nil, err
+			attempted[account.ID] = struct{}{}
+			lastAccount = account
+			lastErr = err
+			continue
 		}
 		if !shouldFailoverRequest(err) {
 			return account, nil, nil, err
@@ -250,7 +262,21 @@ func (a *App) openStreamWithFailover(c *gin.Context, ctx context.Context, endpoi
 		lastAccount = account
 		lastErr = err
 		a.classifyUpstreamError(account.ID, err)
+		if (resolution.ExplicitPrevious || resolution.ImplicitResume) && isRateLimitCapacityFailure(err) {
+			if retry, recoveryErr := a.waitForCapacityRecovery(ctx, endpoint, started, attemptCount, a.recoveryAllowForResolution(resolution)); recoveryErr != nil {
+				return account, nil, nil, recoveryErr
+			} else if retry {
+				clear(attempted)
+				continue
+			}
+			return account, nil, nil, err
+		}
 	}
+}
+
+func isRateLimitCapacityFailure(err error) bool {
+	var upstreamErr *codex.UpstreamError
+	return errors.As(err, &upstreamErr) && (upstreamErr.StatusCode == http.StatusPaymentRequired || upstreamErr.StatusCode == http.StatusTooManyRequests)
 }
 
 func (a *App) shouldHoldStickyThreadQuota(resolution *sessionResolution, account accounts.Record, err error) bool {
@@ -663,6 +689,9 @@ func (a *App) respondOpenAINormalizeError(c *gin.Context, err error) {
 
 func (a *App) handleOpenStreamError(c *gin.Context, endpoint, actualAccountID, reportedAccountID string, err error) {
 	if a.recordRequestCancellation(c, actualAccountID, "", err) {
+		return
+	}
+	if a.writeRateLimitRecoveryOpenAIError(c, err) {
 		return
 	}
 	if errors.Is(err, accounts.ErrThreadQuotaExhausted) {

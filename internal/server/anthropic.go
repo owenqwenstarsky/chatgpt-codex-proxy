@@ -216,6 +216,9 @@ func (a *App) respondAnthropicOpenError(c *gin.Context, actualAccountID, reporte
 	if a.recordRequestCancellation(c, actualAccountID, "", err) {
 		return
 	}
+	if a.writeRateLimitRecoveryAnthropicError(c, err) {
+		return
+	}
 	if strings.Contains(strings.ToLower(err.Error()), "no active accounts") {
 		a.writeAnthropicError(c, http.StatusServiceUnavailable, "no available accounts")
 		return

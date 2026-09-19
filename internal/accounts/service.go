@@ -29,10 +29,15 @@ const (
 )
 
 type threadAffinity struct {
-	AccountID      string
-	ExpiresAt      time.Time
-	QuotaFailures  int
-	QuotaHoldUntil *time.Time
+	AccountID string
+	ExpiresAt time.Time
+}
+
+// Availability reports whether otherwise valid routing capacity can recover at
+// a known time. A nil RecoveryAt means no matching temporarily unavailable
+// account has a known recovery deadline.
+type Availability struct {
+	RecoveryAt *time.Time
 }
 
 type Service struct {
@@ -124,6 +129,40 @@ func (s *Service) EligibleNow(id string) (bool, error) {
 
 	record, ok := s.records[id]
 	return ok && isEligible(record, now), nil
+}
+
+// EarliestAvailability returns the earliest point at which an active,
+// credentialed account allowed by allow can recover from its current cooldown
+// or quota reset. It intentionally ignores LastError text: recovery is derived
+// solely from typed account state and quota timestamps.
+func (s *Service) EarliestAvailability(allow func(Record) bool) (Availability, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC()
+	if err := s.refreshAllLocked(now); err != nil {
+		return Availability{}, err
+	}
+
+	var earliest *time.Time
+	for _, record := range s.records {
+		if record == nil || record.Status != StatusActive || strings.TrimSpace(record.Token.AccessToken) == "" {
+			continue
+		}
+		candidate := cloneRecord(record)
+		if allow != nil && !allow(candidate) {
+			continue
+		}
+		recovery := recordRecoveryAt(record, now)
+		if recovery == nil {
+			continue
+		}
+		if earliest == nil || recovery.Before(*earliest) {
+			value := recovery.UTC()
+			earliest = &value
+		}
+	}
+	return Availability{RecoveryAt: earliest}, nil
 }
 
 func (s *Service) UpsertFromToken(accountID string, token OAuthToken) (Record, error) {
@@ -255,8 +294,6 @@ func (s *Service) ObserveQuota(id string, quota *QuotaSnapshot) error {
 		record.CooldownUntil = nil
 		for key, binding := range s.threadAffinities {
 			if binding.AccountID == id {
-				binding.QuotaFailures = 0
-				binding.QuotaHoldUntil = nil
 				binding.ExpiresAt = now.Add(s.threadAffinityTTL)
 				s.threadAffinities[key] = binding
 			}
@@ -382,20 +419,11 @@ func (s *Service) NoteThreadQuotaFailure(key, accountID string, holdUntil *time.
 		return
 	}
 
-	now := time.Now().UTC()
-	binding := s.threadAffinities[key]
-	if binding.AccountID != accountID || binding.ExpiresAt.Before(now) {
-		binding = threadAffinity{AccountID: accountID}
+	// A quota-limited normal thread must be released immediately. The next
+	// request is selected normally and is only bound after it succeeds.
+	if binding, ok := s.threadAffinities[key]; ok && binding.AccountID == accountID {
+		delete(s.threadAffinities, key)
 	}
-	binding.QuotaFailures++
-	binding.ExpiresAt = now.Add(s.threadAffinityTTL)
-	if holdUntil == nil {
-		value := now.Add(DefaultQuotaFallback)
-		holdUntil = &value
-	}
-	value := holdUntil.UTC()
-	binding.QuotaHoldUntil = &value
-	s.threadAffinities[key] = binding
 }
 
 func (s *Service) SweepThreadAffinities() {
@@ -423,30 +451,10 @@ func (s *Service) AcquireThread(key, preferredID string, allow func(Record) bool
 		return Record{}, err
 	}
 
-	var releasedAccountID string
 	if binding, ok := s.threadAffinities[key]; ok {
 		if !binding.ExpiresAt.After(now) {
 			delete(s.threadAffinities, key)
 		} else if record, exists := s.records[binding.AccountID]; exists {
-			if binding.QuotaHoldUntil != nil && !binding.QuotaHoldUntil.After(now) {
-				binding.QuotaFailures = 0
-				binding.QuotaHoldUntil = nil
-				s.threadAffinities[key] = binding
-			}
-
-			if binding.QuotaFailures > 0 {
-				if binding.QuotaFailures < 2 && binding.QuotaHoldUntil != nil && binding.QuotaHoldUntil.After(now) {
-					binding.QuotaFailures++
-					binding.ExpiresAt = now.Add(s.threadAffinityTTL)
-					s.threadAffinities[key] = binding
-					return cloneRecord(record), ErrThreadQuotaExhausted
-				}
-				if binding.QuotaFailures >= 2 {
-					releasedAccountID = binding.AccountID
-					delete(s.threadAffinities, key)
-				}
-			}
-
 			if _, stillBound := s.threadAffinities[key]; stillBound && isEligible(record, now) {
 				candidate := cloneRecord(record)
 				if allow == nil || allow(candidate) {
@@ -457,32 +465,11 @@ func (s *Service) AcquireThread(key, preferredID string, allow func(Record) bool
 			}
 
 			if _, stillBound := s.threadAffinities[key]; stillBound && quotaBlocksGeneralRouting(record.CachedQuota, now) {
-				binding = s.threadAffinities[key]
-				if binding.QuotaFailures < 2 {
-					binding.QuotaFailures++
-					binding.ExpiresAt = now.Add(s.threadAffinityTTL)
-					reset := QuotaReset(record.CachedQuota, now)
-					if reset == nil {
-						value := now.Add(DefaultQuotaFallback)
-						reset = &value
-					}
-					binding.QuotaHoldUntil = reset
-					s.threadAffinities[key] = binding
-					return cloneRecord(record), ErrThreadQuotaExhausted
-				}
-				releasedAccountID = binding.AccountID
 				delete(s.threadAffinities, key)
 			}
 		}
 	}
-
-	fallbackAllow := allow
-	if releasedAccountID != "" {
-		fallbackAllow = func(record Record) bool {
-			return record.ID != releasedAccountID && (allow == nil || allow(record))
-		}
-	}
-	return s.acquireMatchingLocked(preferredID, fallbackAllow, now)
+	return s.acquireMatchingLocked(preferredID, allow, now)
 }
 
 func (s *Service) Acquire(preferredID string) (Record, error) {

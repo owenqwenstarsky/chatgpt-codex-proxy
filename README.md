@@ -124,10 +124,18 @@ token is missing, or its quota is spent. `code_review_rate_limit` is tracked but
 does not affect routing.
 
 `sticky-thread` keeps each keyed conversation on its own account for the configured
-sticky-thread TTL (30 minutes by default). If that account is out of quota, the
-proxy returns `quota_exhausted` for two requests before routing the next request
-to another eligible account. The affinity is local and does not guarantee that
-OpenAI's upstream prompt cache still exists.
+sticky-thread TTL (30 minutes by default). If that account hits a quota limit on
+a normal request, the proxy releases the affinity immediately, fails over to
+another eligible account, and rebinds only after that replacement succeeds. The
+affinity is local and does not guarantee that OpenAI's upstream prompt cache
+still exists.
+
+When an upstream 402 or 429 exhausts all usable accounts, normal requests first
+try every eligible account, then wait for the earliest known cooldown or quota
+reset for up to `RATE_LIMIT_MAX_WAIT` (2 minutes by default). If capacity still
+has not recovered, the proxy returns a retryable 429 with `Retry-After`.
+Explicit `previous_response_id` continuations remain pinned to their original
+account and wait for that account instead of migrating.
 
 A failed OAuth refresh only expires an account on `invalid_grant`. Anything else
 keeps it active behind a 60-second cooldown.
@@ -146,7 +154,8 @@ docker compose logs -f
 
 Config is environment-only: `PROXY_API_KEY` (required), `PORT` (`8080`),
 `DATA_DIR` (`data`, or `/app/data` in Docker), `DEBUG_LOG_PAYLOADS` (`false`),
-and `STICKY_THREAD_TTL` (`30m`).
+and `STICKY_THREAD_TTL` (`30m`). `RATE_LIMIT_MAX_WAIT` is a positive duration
+and defaults to `2m`.
 
 `${DATA_DIR}` holds `accounts.json` — accounts, OAuth tokens, labels, status,
 quota, cooldowns — and `models-cache.json`. Continuation state and in-flight

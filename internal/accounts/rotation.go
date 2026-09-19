@@ -232,3 +232,42 @@ func isEligible(record *Record, now time.Time) bool {
 	}
 	return !quotaBlocksGeneralRouting(record.CachedQuota, now)
 }
+
+// recordRecoveryAt returns when every typed temporary blocker on a record has
+// cleared. A blocker without a reset timestamp makes the recovery unknown.
+func recordRecoveryAt(record *Record, now time.Time) *time.Time {
+	if record == nil || record.Status != StatusActive || strings.TrimSpace(record.Token.AccessToken) == "" {
+		return nil
+	}
+	var latest *time.Time
+	add := func(value *time.Time) bool {
+		if value == nil || !value.After(now) {
+			return false
+		}
+		if latest == nil || value.After(*latest) {
+			copy := value.UTC()
+			latest = &copy
+		}
+		return true
+	}
+	blocked := false
+	if record.CooldownUntil != nil && record.CooldownUntil.After(now) {
+		blocked = true
+		add(record.CooldownUntil)
+	}
+	if record.CachedQuota != nil {
+		for _, window := range []*RateLimitWindow{&record.CachedQuota.RateLimit, record.CachedQuota.SecondaryRateLimit} {
+			if window == nil || !(windowAvailabilityBlocked(window, now) || windowLimitActive(window, now)) {
+				continue
+			}
+			blocked = true
+			if !add(window.ResetAt) {
+				return nil
+			}
+		}
+	}
+	if !blocked {
+		return nil
+	}
+	return latest
+}

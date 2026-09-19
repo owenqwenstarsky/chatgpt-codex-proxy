@@ -382,7 +382,7 @@ For explicit `previous_response_id` requests on `POST /v1/responses`, `POST /v1/
 
 - the original account is required; the global rotation strategy is not used as a fallback
 - the account must still have a usable token and support the resolved model
-- the continuation is not failed over to another account if the upstream WebSocket request fails
+- the continuation is not failed over to another account if the upstream request fails; a 402 or 429 waits and retries that same account within `RATE_LIMIT_MAX_WAIT`
 - failure to prepare the original account returns `continuation_account_unavailable`
 
 These continuation paths call the account readiness check directly. They do not re-run the normal rotation eligibility filter, so a stored cooldown alone does not move the continuation to another account.
@@ -415,6 +415,21 @@ It is used for temporary upstream failures such as:
 - `429 Too Many Requests`
 - `402 Payment Required` or quota exhaustion
 - transient OAuth refresh failures
+
+## Availability-first recovery
+
+Before sending any client-visible output, normal generation routes immediately
+fail over on upstream 402 and 429. If every eligible, model-compatible account
+is temporarily unavailable, the proxy calculates the earliest recovery from the
+stored `cooldown_until` and quota reset timestamps, waits for it (up to the
+positive `RATE_LIMIT_MAX_WAIT`, default `2m`), refreshes selection, and retries.
+It does not derive recovery timing from error text.
+
+If the wait budget expires, the response is a 429 with `Retry-After` set to the
+earliest known recovery. Disabled, expired, unsupported, and credential-less
+accounts are not recoverable capacity and continue to produce the usual 503
+when no account can serve the request. Once a streaming event is public, the
+request is never retried or held.
 
 ### How 429 cooldown is chosen
 
