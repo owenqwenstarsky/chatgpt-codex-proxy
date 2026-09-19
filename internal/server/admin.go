@@ -212,9 +212,9 @@ func (a *App) handleAdminRotationPut(c *gin.Context) {
 	}
 	strategy := accounts.RotationStrategy(strings.TrimSpace(body.Strategy))
 	switch strategy {
-	case accounts.RotationLeastUsed, accounts.RotationRoundRobin, accounts.RotationSticky:
+	case accounts.RotationLeastUsed, accounts.RotationRoundRobin, accounts.RotationSticky, accounts.RotationStickyThread:
 	default:
-		a.writeAdminError(c, http.StatusBadRequest, "invalid_strategy", "strategy must be least_used, round_robin, or sticky")
+		a.writeAdminError(c, http.StatusBadRequest, "invalid_strategy", "strategy must be least_used, round_robin, sticky, or sticky-thread")
 		return
 	}
 	if err := a.accounts.SetRotationStrategy(strategy); err != nil {

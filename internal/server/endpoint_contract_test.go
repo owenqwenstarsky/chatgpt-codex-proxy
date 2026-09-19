@@ -123,7 +123,7 @@ func TestAdminEndpointLifecycle(t *testing.T) {
 	if record := mustGetAccount(t, svc, "acct_fixture"); record.Token.RefreshToken != "fixture-refreshed-secret" {
 		t.Fatal("refreshed token was not saved")
 	}
-	for _, strategy := range []string{"round_robin", "sticky", "least_used"} {
+	for _, strategy := range []string{"round_robin", "sticky", "sticky-thread", "least_used"} {
 		request("PUT", "/admin/rotation", `{"strategy":"`+strategy+`"}`, 200)
 		if request("GET", "/admin/rotation", "", 200)["strategy"] != strategy {
 			t.Fatal("rotation update not persisted")

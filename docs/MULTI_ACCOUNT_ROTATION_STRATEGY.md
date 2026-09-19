@@ -27,13 +27,15 @@ The selection model is intentionally simple:
 - There is no local token accounting.
 - There is no local request history.
 - There is no persistent "usage ledger" maintained by the proxy.
+- `sticky-thread` maintains a bounded, in-memory conversation-to-account affinity map.
 - Rotation decisions are based on cached upstream quota data plus a simple transient cooldown field.
 
-The proxy supports three public rotation strategies:
+The proxy supports four public rotation strategies:
 
 - `least_used`
 - `round_robin`
 - `sticky`
+- `sticky-thread`
 
 Before any strategy runs, the proxy filters the account list down to accounts that are currently eligible.
 
@@ -348,6 +350,30 @@ If `acct_a` later hits cooldown:
 - `sticky` cannot use it
 - the proxy falls back to `least_used`
 
+## `sticky-thread`
+
+`sticky-thread` keeps independent conversation keys on independent accounts. The
+proxy uses the explicit `prompt_cache_key` when supplied, then the resolved
+conversation key, and otherwise falls back to the normal rotation strategy.
+
+Thread affinity is local in-memory state and expires after `STICKY_THREAD_TTL`,
+which defaults to 30 minutes. This is a proxy routing TTL, not a guarantee about
+OpenAI prompt-cache retention. OpenAI's `prompt_cache_key` influences cache
+routing but does not pin a request to a machine or guarantee a cache hit.
+
+If a bound account is known to be out of quota, the first two requests for that
+thread return `quota_exhausted`. The third request releases the exhausted binding
+and selects another eligible account. A successful request on the replacement
+account binds the thread to it and clears the quota-failure counter.
+
+The two-error grace period is proxy behavior, not a Responses API behavior. A
+quota failure discovered from an upstream `402` is not silently failed over in
+the same request when `sticky-thread` is active. Explicit
+`previous_response_id` continuations retain their existing strict account
+pinning because response-chain state may not be portable between accounts.
+Implicit resume keeps its existing behavior: it tries the original account first
+and may replay the full request through normal routing if resume fails.
+
 ## Continuations and Preferred Account Routing
 
 The proxy keeps short-lived continuation state in memory, including the account that created each response.
@@ -615,6 +641,7 @@ If you need a short way to think about the system, use this:
 - `cooldown_until` decides whether the account is temporarily parked
 - `cached_quota` decides whether the account appears exhausted and how `least_used` ranks it
 - `sticky` only remembers the last successful healthy account in memory
+- `sticky-thread` stores expiring per-conversation affinity and a two-error quota counter in memory
 - explicit continuations remain pinned to their original account
 
 ## Summary
@@ -622,12 +649,12 @@ If you need a short way to think about the system, use this:
 The current rotation system is deliberately small and predictable:
 
 - Eligibility first
-- Then one of three strategies
+- Then one of four strategies
 - Ranking based on cached upstream quota only
-- No local usage counters
+- No local usage counters for account ranking
 - One transient cooldown mechanism
-- One in-memory sticky preference
-- Safe in-request failover before client-visible output
+- One global sticky preference or expiring per-thread affinities
+- Safe in-request failover before client-visible output, except sticky-thread quota holds
 - Explicit continuations require their original account
 
 If you want to understand why a specific request chose a specific account, the right questions are:

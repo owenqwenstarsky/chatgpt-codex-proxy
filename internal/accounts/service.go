@@ -2,6 +2,7 @@ package accounts
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -13,23 +14,36 @@ import (
 const (
 	DefaultRateLimitFallback = 60 * time.Second
 	DefaultQuotaFallback     = 5 * time.Minute
+	DefaultThreadAffinityTTL = 30 * time.Minute
 )
+
+var ErrThreadQuotaExhausted = errors.New("sticky thread account quota exhausted")
 
 type RotationStrategy string
 
 const (
-	RotationLeastUsed  RotationStrategy = "least_used"
-	RotationRoundRobin RotationStrategy = "round_robin"
-	RotationSticky     RotationStrategy = "sticky"
+	RotationLeastUsed    RotationStrategy = "least_used"
+	RotationRoundRobin   RotationStrategy = "round_robin"
+	RotationSticky       RotationStrategy = "sticky"
+	RotationStickyThread RotationStrategy = "sticky-thread"
 )
 
+type threadAffinity struct {
+	AccountID      string
+	ExpiresAt      time.Time
+	QuotaFailures  int
+	QuotaHoldUntil *time.Time
+}
+
 type Service struct {
-	mu               sync.RWMutex
-	store            Store
-	records          map[string]*Record
-	rotationStrategy RotationStrategy
-	roundRobinIndex  int
-	stickyAccountID  string
+	mu                sync.RWMutex
+	store             Store
+	records           map[string]*Record
+	rotationStrategy  RotationStrategy
+	roundRobinIndex   int
+	stickyAccountID   string
+	threadAffinityTTL time.Duration
+	threadAffinities  map[string]threadAffinity
 }
 
 var accountIDSequence uint64
@@ -41,9 +55,11 @@ func NewService(accountsStore Store, defaultStrategy RotationStrategy) (*Service
 	}
 
 	svc := &Service{
-		store:            accountsStore,
-		records:          make(map[string]*Record),
-		rotationStrategy: cmp.Or(state.RotationStrategy, defaultStrategy),
+		store:             accountsStore,
+		records:           make(map[string]*Record),
+		rotationStrategy:  cmp.Or(state.RotationStrategy, defaultStrategy),
+		threadAffinityTTL: DefaultThreadAffinityTTL,
+		threadAffinities:  make(map[string]threadAffinity),
 	}
 
 	now := time.Now().UTC()
@@ -175,6 +191,11 @@ func (s *Service) Remove(id string) error {
 	if s.stickyAccountID == id {
 		s.stickyAccountID = ""
 	}
+	for key, binding := range s.threadAffinities {
+		if binding.AccountID == id {
+			delete(s.threadAffinities, key)
+		}
+	}
 	return s.persistLocked()
 }
 
@@ -232,6 +253,14 @@ func (s *Service) ObserveQuota(id string, quota *QuotaSnapshot) error {
 	}
 	if !quotaBlocksGeneralRouting(record.CachedQuota, now) {
 		record.CooldownUntil = nil
+		for key, binding := range s.threadAffinities {
+			if binding.AccountID == id {
+				binding.QuotaFailures = 0
+				binding.QuotaHoldUntil = nil
+				binding.ExpiresAt = now.Add(s.threadAffinityTTL)
+				s.threadAffinities[key] = binding
+			}
+		}
 	}
 	record.UpdatedAt = now
 	return s.persistLocked()
@@ -313,6 +342,149 @@ func (s *Service) NoteSuccess(id string) {
 	s.stickyAccountID = id
 }
 
+func (s *Service) SetThreadAffinityTTL(ttl time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ttl <= 0 {
+		ttl = DefaultThreadAffinityTTL
+	}
+	s.threadAffinityTTL = ttl
+}
+
+func (s *Service) NoteThreadSuccess(key, accountID string) {
+	key = strings.TrimSpace(key)
+	accountID = strings.TrimSpace(accountID)
+	if key == "" || accountID == "" {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.records[accountID]; !ok {
+		return
+	}
+	s.threadAffinities[key] = threadAffinity{
+		AccountID: accountID,
+		ExpiresAt: time.Now().UTC().Add(s.threadAffinityTTL),
+	}
+}
+
+func (s *Service) NoteThreadQuotaFailure(key, accountID string, holdUntil *time.Time) {
+	key = strings.TrimSpace(key)
+	accountID = strings.TrimSpace(accountID)
+	if key == "" || accountID == "" {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.records[accountID]; !ok {
+		return
+	}
+
+	now := time.Now().UTC()
+	binding := s.threadAffinities[key]
+	if binding.AccountID != accountID || binding.ExpiresAt.Before(now) {
+		binding = threadAffinity{AccountID: accountID}
+	}
+	binding.QuotaFailures++
+	binding.ExpiresAt = now.Add(s.threadAffinityTTL)
+	if holdUntil == nil {
+		value := now.Add(DefaultQuotaFallback)
+		holdUntil = &value
+	}
+	value := holdUntil.UTC()
+	binding.QuotaHoldUntil = &value
+	s.threadAffinities[key] = binding
+}
+
+func (s *Service) SweepThreadAffinities() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	for key, binding := range s.threadAffinities {
+		if !binding.ExpiresAt.After(now) {
+			delete(s.threadAffinities, key)
+		}
+	}
+}
+
+func (s *Service) AcquireThread(key, preferredID string, allow func(Record) bool) (Record, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return s.AcquireMatching(preferredID, allow)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC()
+	if err := s.refreshAllLocked(now); err != nil {
+		return Record{}, err
+	}
+
+	var releasedAccountID string
+	if binding, ok := s.threadAffinities[key]; ok {
+		if !binding.ExpiresAt.After(now) {
+			delete(s.threadAffinities, key)
+		} else if record, exists := s.records[binding.AccountID]; exists {
+			if binding.QuotaHoldUntil != nil && !binding.QuotaHoldUntil.After(now) {
+				binding.QuotaFailures = 0
+				binding.QuotaHoldUntil = nil
+				s.threadAffinities[key] = binding
+			}
+
+			if binding.QuotaFailures > 0 {
+				if binding.QuotaFailures < 2 && binding.QuotaHoldUntil != nil && binding.QuotaHoldUntil.After(now) {
+					binding.QuotaFailures++
+					binding.ExpiresAt = now.Add(s.threadAffinityTTL)
+					s.threadAffinities[key] = binding
+					return cloneRecord(record), ErrThreadQuotaExhausted
+				}
+				if binding.QuotaFailures >= 2 {
+					releasedAccountID = binding.AccountID
+					delete(s.threadAffinities, key)
+				}
+			}
+
+			if _, stillBound := s.threadAffinities[key]; stillBound && isEligible(record, now) {
+				candidate := cloneRecord(record)
+				if allow == nil || allow(candidate) {
+					binding.ExpiresAt = now.Add(s.threadAffinityTTL)
+					s.threadAffinities[key] = binding
+					return candidate, nil
+				}
+			}
+
+			if _, stillBound := s.threadAffinities[key]; stillBound && quotaBlocksGeneralRouting(record.CachedQuota, now) {
+				binding = s.threadAffinities[key]
+				if binding.QuotaFailures < 2 {
+					binding.QuotaFailures++
+					binding.ExpiresAt = now.Add(s.threadAffinityTTL)
+					reset := QuotaReset(record.CachedQuota, now)
+					if reset == nil {
+						value := now.Add(DefaultQuotaFallback)
+						reset = &value
+					}
+					binding.QuotaHoldUntil = reset
+					s.threadAffinities[key] = binding
+					return cloneRecord(record), ErrThreadQuotaExhausted
+				}
+				releasedAccountID = binding.AccountID
+				delete(s.threadAffinities, key)
+			}
+		}
+	}
+
+	fallbackAllow := allow
+	if releasedAccountID != "" {
+		fallbackAllow = func(record Record) bool {
+			return record.ID != releasedAccountID && (allow == nil || allow(record))
+		}
+	}
+	return s.acquireMatchingLocked(preferredID, fallbackAllow, now)
+}
+
 func (s *Service) Acquire(preferredID string) (Record, error) {
 	return s.AcquireMatching(preferredID, nil)
 }
@@ -325,7 +497,10 @@ func (s *Service) AcquireMatching(preferredID string, allow func(Record) bool) (
 	if err := s.refreshAllLocked(now); err != nil {
 		return Record{}, err
 	}
+	return s.acquireMatchingLocked(preferredID, allow, now)
+}
 
+func (s *Service) acquireMatchingLocked(preferredID string, allow func(Record) bool, now time.Time) (Record, error) {
 	if preferredID != "" {
 		if record, ok := s.records[preferredID]; ok && isEligible(record, now) {
 			candidate := cloneRecord(record)

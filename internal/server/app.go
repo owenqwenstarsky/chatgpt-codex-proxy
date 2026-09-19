@@ -48,6 +48,7 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 		return nil, err
 	}
 
+	accountsSvc.SetThreadAffinityTTL(cfg.StickyThreadTTL)
 	modelCatalog := models.NewCatalog(models.BootstrapEntries())
 	if snapshot, err := models.LoadCache(cfg.DataDir); err == nil {
 		modelCatalog.LoadCache(snapshot)
@@ -114,6 +115,7 @@ func (a *App) housekeeping(ctx context.Context) {
 			return
 		case <-sweeps:
 			a.continuations.Sweep()
+			a.accounts.SweepThreadAffinities()
 			a.claudeReplays.Sweep()
 			a.deviceLogins.DeleteExpired(time.Now().UTC())
 		}

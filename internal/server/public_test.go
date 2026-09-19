@@ -45,6 +45,47 @@ func newFailoverTestApp(t *testing.T) *App {
 	}
 }
 
+func TestStickyThreadReturnsQuotaErrorsBeforeFailingOver(t *testing.T) {
+	app := newFailoverTestApp(t)
+	if err := app.accounts.SetRotationStrategy(accounts.RotationStickyThread); err != nil {
+		t.Fatalf("SetRotationStrategy() error = %v", err)
+	}
+
+	var attempts []string
+	app.httpStream = func(_ context.Context, account accounts.Record, _ codex.Request, _ string) (eventStream, error) {
+		attempts = append(attempts, account.ID)
+		if account.ID == "acct-a" {
+			return nil, &codex.UpstreamError{Op: "codex response", StatusCode: http.StatusPaymentRequired}
+		}
+		return &fakeEventStream{events: []*codex.StreamEvent{{
+			Type: "response.completed",
+			Raw:  map[string]any{"response": map[string]any{"id": "resp_sticky_thread", "status": "completed"}},
+		}}}, nil
+	}
+
+	request := func() *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.6-terra","prompt_cache_key":"thread-a","input":"hello","stream":false}`))
+		ctx.Request.Header.Set("Content-Type", "application/json")
+		app.handleResponses(ctx)
+		return recorder
+	}
+
+	first := request()
+	second := request()
+	third := request()
+	if first.Code != http.StatusPaymentRequired || second.Code != http.StatusPaymentRequired {
+		t.Fatalf("quota response statuses = %d, %d; want 402, 402", first.Code, second.Code)
+	}
+	if third.Code != http.StatusOK {
+		t.Fatalf("third response status = %d, body = %s; want 200", third.Code, third.Body.String())
+	}
+	if len(attempts) != 2 || attempts[0] != "acct-a" || attempts[1] != "acct-b" {
+		t.Fatalf("upstream attempts = %#v, want acct-a then acct-b", attempts)
+	}
+}
+
 func TestOpenStreamFailsOverToAnotherAccount(t *testing.T) {
 	t.Parallel()
 

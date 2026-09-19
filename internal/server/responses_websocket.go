@@ -156,6 +156,9 @@ func (a *App) handleResponsesWebSocketTurn(c *gin.Context, conn *websocket.Conn,
 		return writeResponsesWebSocketError(conn, status, code, message, "api_error", "")
 	}
 	a.setRequestAccount(c, account)
+	if key := strings.TrimSpace(resolution.ConversationKey); key != "" {
+		c.Set(stickyThreadConversationKey, key)
+	}
 
 	body := resolution.Request.ToCodexWSCreatePayload()
 	if session.stream == nil || session.account.ID != account.ID {
@@ -174,6 +177,7 @@ func (a *App) handleResponsesWebSocketTurn(c *gin.Context, conn *websocket.Conn,
 		if connectErr != nil {
 			session.stream = nil
 			session.account = accounts.Record{}
+			a.noteStickyThreadQuotaFailure(resolution.ConversationKey, account.ID, connectErr)
 			status, code, message := a.responsesWebSocketOpenError(c, account.ID, connectErr)
 			return writeResponsesWebSocketError(conn, status, code, message, "api_error", "")
 		}
@@ -208,6 +212,7 @@ func (a *App) handleResponsesWebSocketTurn(c *gin.Context, conn *websocket.Conn,
 				session.account = accounts.Record{}
 			}
 			status, code, message := a.classifyUpstreamError(account.ID, err)
+			a.noteStickyThreadQuotaFailure(resolution.ConversationKey, account.ID, err)
 			a.logUpstreamStreamFailure(c, "responses_websocket", account.ID, accumulator.ResponseID, err)
 			middleware.SetRequestOutcome(c, "upstream_error")
 			middleware.SetRequestError(c, code, message)
@@ -292,6 +297,9 @@ func responsesWebSocketRequestError(err error) (int, string, string, string) {
 }
 
 func (a *App) responsesWebSocketOpenError(c *gin.Context, accountID string, err error) (int, string, string) {
+	if errors.Is(err, accounts.ErrThreadQuotaExhausted) {
+		return http.StatusPaymentRequired, "quota_exhausted", "upstream account quota exhausted"
+	}
 	if errors.Is(err, errContinuationAccountUnavailable) {
 		return http.StatusServiceUnavailable, "continuation_account_unavailable", "continuation account unavailable"
 	}

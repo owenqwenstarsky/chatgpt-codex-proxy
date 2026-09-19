@@ -18,6 +18,7 @@ type healthResponse struct {
 	CodexBaseURL    string                    `json:"codex_base_url,omitempty"`
 	RequestTimeout  string                    `json:"request_timeout,omitempty"`
 	ContinuationTTL string                    `json:"continuation_ttl,omitempty"`
+	StickyThreadTTL string                    `json:"sticky_thread_ttl,omitempty"`
 	Error           string                    `json:"error,omitempty"`
 }
 
@@ -44,5 +45,6 @@ func (a *App) handleHealth(c *gin.Context) {
 		CodexBaseURL:    a.cfg.CodexBaseURL,
 		RequestTimeout:  a.cfg.RequestTimeout.String(),
 		ContinuationTTL: a.cfg.ContinuationTTL.String(),
+		StickyThreadTTL: a.cfg.StickyThreadTTL.String(),
 	})
 }
