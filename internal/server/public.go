@@ -42,6 +42,8 @@ type sessionResolution struct {
 
 var errIncompleteResponse = errors.New("upstream stream ended before a terminal response event")
 
+const stickyThreadConversationKey = "sticky_thread_conversation_key"
+
 type openedRequest struct {
 	Resolution sessionResolution
 	Account    accounts.Record
@@ -161,6 +163,9 @@ func (a *App) resolveAndOpenRequest(c *gin.Context, endpoint string, normalized 
 	}
 
 	a.setRequestAccount(c, account)
+	if key := strings.TrimSpace(resolution.ConversationKey); key != "" {
+		c.Set(stickyThreadConversationKey, key)
+	}
 	a.observeQuotaSnapshot(account.ID, quota)
 
 	return openedRequest{
@@ -225,6 +230,18 @@ func (a *App) openStreamWithFailover(c *gin.Context, ctx context.Context, endpoi
 			}
 			return account, nil, nil, err
 		}
+		if errors.Is(err, accounts.ErrThreadQuotaExhausted) {
+			return account, nil, nil, err
+		}
+		if a.shouldHoldStickyThreadQuota(resolution, account, err) {
+			a.classifyUpstreamError(account.ID, err)
+			a.accounts.NoteThreadQuotaFailure(
+				resolution.ConversationKey,
+				account.ID,
+				a.quotaCooldownUntil(account.ID, time.Now().UTC()),
+			)
+			return account, nil, nil, err
+		}
 		if !shouldFailoverRequest(err) {
 			return account, nil, nil, err
 		}
@@ -234,6 +251,28 @@ func (a *App) openStreamWithFailover(c *gin.Context, ctx context.Context, endpoi
 		lastErr = err
 		a.classifyUpstreamError(account.ID, err)
 	}
+}
+
+func (a *App) shouldHoldStickyThreadQuota(resolution *sessionResolution, account accounts.Record, err error) bool {
+	if resolution == nil || account.ID == "" || strings.TrimSpace(resolution.ConversationKey) == "" ||
+		resolution.ExplicitPrevious || resolution.ImplicitResume ||
+		a.accounts.RotationStrategy() != accounts.RotationStickyThread {
+		return false
+	}
+	var upstreamErr *codex.UpstreamError
+	return errors.As(err, &upstreamErr) && upstreamErr.StatusCode == http.StatusPaymentRequired
+}
+
+func (a *App) noteStickyThreadQuotaFailure(key, accountID string, err error) bool {
+	if a.accounts.RotationStrategy() != accounts.RotationStickyThread || strings.TrimSpace(key) == "" || strings.TrimSpace(accountID) == "" {
+		return false
+	}
+	var upstreamErr *codex.UpstreamError
+	if !errors.As(err, &upstreamErr) || upstreamErr.StatusCode != http.StatusPaymentRequired {
+		return false
+	}
+	a.accounts.NoteThreadQuotaFailure(key, accountID, a.quotaCooldownUntil(accountID, time.Now().UTC()))
+	return true
 }
 
 func (a *App) prepareStreamForDelivery(ctx context.Context, account accounts.Record, stream eventStream, streaming bool) (eventStream, error) {
@@ -496,6 +535,12 @@ func (a *App) nextStreamEvent(ctx context.Context, account accounts.Record, accu
 }
 
 func (a *App) finalizeSuccessfulStream(accountID string, accumulator *turn.Accumulator, stream eventStream) {
+	if a.accounts.RotationStrategy() == accounts.RotationStickyThread {
+		conversationKey := resolutionConversationKey(accumulator.Normalized)
+		if strings.TrimSpace(conversationKey) != "" {
+			a.accounts.NoteThreadSuccess(conversationKey, accountID)
+		}
+	}
 	a.accounts.NoteSuccess(accountID)
 	a.rememberContinuation(accountID, accumulator, stream.Headers().Get("x-codex-turn-state"))
 }
@@ -620,6 +665,10 @@ func (a *App) handleOpenStreamError(c *gin.Context, endpoint, actualAccountID, r
 	if a.recordRequestCancellation(c, actualAccountID, "", err) {
 		return
 	}
+	if errors.Is(err, accounts.ErrThreadQuotaExhausted) {
+		a.writeOpenAIError(c, http.StatusPaymentRequired, "quota_exhausted", "upstream account quota exhausted", "api_error")
+		return
+	}
 	if errors.Is(err, errContinuationAccountUnavailable) {
 		a.writeOpenAIError(c, http.StatusServiceUnavailable, "continuation_account_unavailable", "continuation account unavailable", "api_error")
 		return
@@ -653,6 +702,9 @@ func (a *App) respondStreamError(c *gin.Context, endpoint, accountID, responseID
 	status, code, message := http.StatusInternalServerError, "api_error", err.Error()
 	if classify {
 		status, code, message = a.classifyUpstreamError(accountID, err)
+		if value, ok := c.Get(stickyThreadConversationKey); ok {
+			a.noteStickyThreadQuotaFailure(jsonutil.StringValue(value), accountID, err)
+		}
 	}
 	a.logUpstreamStreamFailure(c, endpoint, accountID, responseID, err)
 	middleware.SetRequestOutcome(c, "upstream_error")
@@ -672,6 +724,8 @@ func writeResponsesStreamError(writer io.Writer, status int, message string) {
 	switch status {
 	case http.StatusUnauthorized:
 		code = "invalid_api_key"
+	case http.StatusPaymentRequired:
+		code = "quota_exhausted"
 	case http.StatusForbidden:
 		code = "insufficient_quota"
 	case http.StatusTooManyRequests:
@@ -711,7 +765,13 @@ func (a *App) acquireAccountForResolutionExcluding(ctx context.Context, resoluti
 		return record, nil
 	}
 	acquireReady := func(modelID string) (accounts.Record, error) {
-		record, err := a.accounts.AcquireMatching(resolution.PreferredAccountID, func(record accounts.Record) bool {
+		acquire := func(preferredID string, allow func(accounts.Record) bool) (accounts.Record, error) {
+			if a.accounts.RotationStrategy() == accounts.RotationStickyThread && strings.TrimSpace(resolution.ConversationKey) != "" {
+				return a.accounts.AcquireThread(resolution.ConversationKey, preferredID, allow)
+			}
+			return a.accounts.AcquireMatching(preferredID, allow)
+		}
+		record, err := acquire(resolution.PreferredAccountID, func(record accounts.Record) bool {
 			if _, alreadyAttempted := attempted[record.ID]; alreadyAttempted {
 				return false
 			}
@@ -737,7 +797,9 @@ func (a *App) acquireAccountForResolutionExcluding(ctx context.Context, resoluti
 		}
 		resolution.Request.Model = modelID
 		resolution.Original.Model = modelID
-		if key := conversation.Derive(resolution.Request.Request); key != "" {
+		if key := strings.TrimSpace(resolution.Request.PromptCacheKey); key != "" {
+			resolution.ConversationKey = key
+		} else if key := conversation.Derive(resolution.Request.Request); key != "" {
 			resolution.ConversationKey = key
 			resolution.Request.PromptCacheKey = key
 			resolution.Original.PromptCacheKey = key

@@ -22,6 +22,7 @@ type Config struct {
 	OAuthClientID    string
 	LoginTimeout     time.Duration
 	ContinuationTTL  time.Duration
+	StickyThreadTTL  time.Duration
 	RequestTimeout   time.Duration
 	RefreshSkew      time.Duration
 }
@@ -60,6 +61,15 @@ func Load() (Config, error) {
 		}
 	}
 
+	stickyThreadTTL := 30 * time.Minute
+	if raw := strings.TrimSpace(os.Getenv("STICKY_THREAD_TTL")); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil || parsed <= 0 {
+			return Config{}, fmt.Errorf("STICKY_THREAD_TTL must be a positive duration")
+		}
+		stickyThreadTTL = parsed
+	}
+
 	cfg := Config{
 		ListenAddr:       ":" + strconv.Itoa(portNumber),
 		DataDir:          dataDir,
@@ -71,6 +81,7 @@ func Load() (Config, error) {
 		OAuthClientID:    "app_EMoamEEZ73f0CkXaXp7hrann",
 		LoginTimeout:     15 * time.Minute,
 		ContinuationTTL:  time.Hour,
+		StickyThreadTTL:  stickyThreadTTL,
 		RequestTimeout:   30 * time.Minute,
 		RefreshSkew:      time.Minute,
 	}

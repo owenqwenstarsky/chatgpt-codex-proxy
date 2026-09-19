@@ -147,6 +147,89 @@ func TestLeastUsedSortsUnknownQuotaBehindKnownQuota(t *testing.T) {
 	}
 }
 
+func TestStickyThreadReusesIndependentThreadAccounts(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, RotationStickyThread,
+		recordWithQuota("acct_a", 10, nil),
+		recordWithQuota("acct_b", 20, nil),
+	)
+	svc.NoteThreadSuccess("thread-a", "acct_a")
+	svc.NoteThreadSuccess("thread-b", "acct_b")
+
+	first, err := svc.AcquireThread("thread-a", "", nil)
+	if err != nil {
+		t.Fatalf("AcquireThread(thread-a) error = %v", err)
+	}
+	second, err := svc.AcquireThread("thread-b", "", nil)
+	if err != nil {
+		t.Fatalf("AcquireThread(thread-b) error = %v", err)
+	}
+	if first.ID != "acct_a" || second.ID != "acct_b" {
+		t.Fatalf("thread accounts = %q, %q; want acct_a, acct_b", first.ID, second.ID)
+	}
+}
+
+func TestStickyThreadExpiredAffinityFallsBackToSelection(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, RotationStickyThread,
+		recordWithQuota("acct_a", 10, nil),
+		recordWithQuota("acct_b", 20, nil),
+	)
+	svc.NoteThreadSuccess("thread-a", "acct_b")
+	svc.mu.Lock()
+	binding := svc.threadAffinities["thread-a"]
+	binding.ExpiresAt = time.Now().UTC().Add(-time.Second)
+	svc.threadAffinities["thread-a"] = binding
+	svc.mu.Unlock()
+
+	record, err := svc.AcquireThread("thread-a", "", nil)
+	if err != nil {
+		t.Fatalf("AcquireThread() error = %v", err)
+	}
+	if record.ID != "acct_a" {
+		t.Fatalf("expired affinity selected %q, want least-used acct_a", record.ID)
+	}
+}
+
+func TestStickyThreadReturnsQuotaErrorTwiceThenFallsBack(t *testing.T) {
+	t.Parallel()
+
+	svc := newTestService(t, RotationStickyThread,
+		recordWithQuota("acct_a", 10, nil),
+		recordWithQuota("acct_b", 20, nil),
+	)
+	now := time.Now().UTC()
+	resetAt := now.Add(time.Hour)
+	acctA, ok, err := svc.Get("acct_a")
+	if err != nil || !ok {
+		t.Fatalf("Get(acct_a) = %#v, %v; want account", acctA, err)
+	}
+	acctA.CachedQuota.RateLimit.Allowed = false
+	acctA.CachedQuota.RateLimit.ResetAt = &resetAt
+	if err := svc.ObserveQuota("acct_a", acctA.CachedQuota); err != nil {
+		t.Fatalf("ObserveQuota() error = %v", err)
+	}
+	svc.NoteThreadSuccess("thread-a", "acct_a")
+
+	first, err := svc.AcquireThread("thread-a", "", nil)
+	if first.ID != "acct_a" || !errors.Is(err, ErrThreadQuotaExhausted) {
+		t.Fatalf("first quota attempt = %q, %v; want acct_a and ErrThreadQuotaExhausted", first.ID, err)
+	}
+	second, err := svc.AcquireThread("thread-a", "", nil)
+	if second.ID != "acct_a" || !errors.Is(err, ErrThreadQuotaExhausted) {
+		t.Fatalf("second quota attempt = %q, %v; want acct_a and ErrThreadQuotaExhausted", second.ID, err)
+	}
+	third, err := svc.AcquireThread("thread-a", "", nil)
+	if err != nil {
+		t.Fatalf("third AcquireThread() error = %v", err)
+	}
+	if third.ID != "acct_b" {
+		t.Fatalf("third account = %q, want acct_b", third.ID)
+	}
+}
+
 func TestStickyReusesLastSuccessfulEligibleAccount(t *testing.T) {
 	t.Parallel()
 

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -146,6 +147,41 @@ func TestResponsesStreamErrorUsesTopLevelResponsesShape(t *testing.T) {
 	}
 	if _, nested := events[0].Data["error"]; nested {
 		t.Fatalf("error payload = %#v, want top-level fields", events[0].Data)
+	}
+}
+
+func TestResponsesStreamQuotaErrorUsesQuotaCode(t *testing.T) {
+	t.Parallel()
+
+	var output strings.Builder
+	writeResponsesStreamError(&output, http.StatusPaymentRequired, "upstream account quota exhausted")
+	events := parseSSEEvents(t, output.String())
+	if len(events) != 1 || events[0].Data["code"] != "quota_exhausted" {
+		t.Fatalf("error payload = %#v, want quota_exhausted", events)
+	}
+}
+
+func TestStreamingQuotaFailureStartsStickyThreadGrace(t *testing.T) {
+	t.Parallel()
+
+	app := newFailoverTestApp(t)
+	if err := app.accounts.SetRotationStrategy(accounts.RotationStickyThread); err != nil {
+		t.Fatalf("SetRotationStrategy() error = %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	ctx.Set(stickyThreadConversationKey, "thread-stream")
+
+	app.respondStreamError(ctx, "responses", "acct-a", "resp-quota", "error", &codex.UpstreamError{
+		Op:         "codex stream",
+		StatusCode: http.StatusPaymentRequired,
+		Code:       "quota_exhausted",
+	}, true)
+
+	record, err := app.accounts.AcquireThread("thread-stream", "", nil)
+	if record.ID != "acct-a" || !errors.Is(err, accounts.ErrThreadQuotaExhausted) {
+		t.Fatalf("next thread request = %q, %v; want acct-a quota error", record.ID, err)
 	}
 }
 

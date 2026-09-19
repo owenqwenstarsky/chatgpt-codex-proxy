@@ -55,6 +55,13 @@ func (a *App) resolveSession(normalized turn.NormalizedRequest) (sessionResoluti
 	}
 
 	if strings.TrimSpace(resolution.Request.Model) == "" {
+		if key := strings.TrimSpace(normalized.PromptCacheKey); key != "" {
+			resolution.ConversationKey = key
+		} else if key := conversation.Derive(normalized.Request); key != "" {
+			resolution.ConversationKey = key
+			resolution.Request.PromptCacheKey = key
+			resolution.Original.PromptCacheKey = key
+		}
 		return resolution, nil
 	}
 

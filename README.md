@@ -29,7 +29,7 @@ Built for local and small-scale use.
 
 - **Two API surfaces, one backend** — OpenAI Chat Completions, Responses, and Images plus Anthropic Messages.
 - **Streaming everywhere** — SSE, a persistent WebSocket for Responses, or plain JSON.
-- **Multi-account rotation** — least-used, round-robin, or sticky, with cooldowns and quota awareness.
+- **Multi-account rotation** — least-used, round-robin, sticky, or sticky-thread, with cooldowns and quota awareness.
 - **Device login** — add an account by opening a URL. No cookie scraping, no pasted tokens.
 - **Tools and structured output** — custom tools, legacy `functions`, `json_schema`, `json_object`.
 
@@ -118,10 +118,16 @@ GET    /admin/rotation
 PUT    /admin/rotation
 ```
 
-Rotation is `least_used`, `round_robin`, or `sticky`. An account is skipped when
+Rotation is `least_used`, `round_robin`, `sticky`, or `sticky-thread`. An account is skipped when
 its status is `disabled`, `expired`, or `banned`, a cooldown is active, its
 token is missing, or its quota is spent. `code_review_rate_limit` is tracked but
 does not affect routing.
+
+`sticky-thread` keeps each keyed conversation on its own account for the configured
+sticky-thread TTL (30 minutes by default). If that account is out of quota, the
+proxy returns `quota_exhausted` for two requests before routing the next request
+to another eligible account. The affinity is local and does not guarantee that
+OpenAI's upstream prompt cache still exists.
 
 A failed OAuth refresh only expires an account on `invalid_grant`. Anything else
 keeps it active behind a 60-second cooldown.
@@ -139,7 +145,8 @@ docker compose logs -f
 ```
 
 Config is environment-only: `PROXY_API_KEY` (required), `PORT` (`8080`),
-`DATA_DIR` (`data`, or `/app/data` in Docker), `DEBUG_LOG_PAYLOADS` (`false`).
+`DATA_DIR` (`data`, or `/app/data` in Docker), `DEBUG_LOG_PAYLOADS` (`false`),
+and `STICKY_THREAD_TTL` (`30m`).
 
 `${DATA_DIR}` holds `accounts.json` — accounts, OAuth tokens, labels, status,
 quota, cooldowns — and `models-cache.json`. Continuation state and in-flight

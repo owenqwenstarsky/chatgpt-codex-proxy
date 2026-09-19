@@ -127,6 +127,24 @@ func TestResolveSessionBuildsReplayForExplicitHTTPContinuation(t *testing.T) {
 	}
 }
 
+func TestResolveSessionSetsConversationKeyWithoutExplicitModel(t *testing.T) {
+	t.Parallel()
+
+	app := &App{continuations: conversation.NewContinuationManager(time.Minute)}
+	normalized := turn.NormalizedRequest{Request: codex.Request{
+		PromptCacheKey: "thread-with-default-model",
+		Input:          []codex.InputItem{userText("hello")},
+	}}
+
+	resolution, err := app.resolveSession(normalized)
+	if err != nil {
+		t.Fatalf("resolveSession() error = %v", err)
+	}
+	if resolution.ConversationKey != "thread-with-default-model" {
+		t.Fatalf("ConversationKey = %q, want thread-with-default-model", resolution.ConversationKey)
+	}
+}
+
 func TestResolveSessionPreservesExplicitPromptCacheKey(t *testing.T) {
 	t.Parallel()
 

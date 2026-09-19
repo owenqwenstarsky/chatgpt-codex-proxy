@@ -3,6 +3,7 @@ package config
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadRequiresProxyAPIKey(t *testing.T) {
@@ -64,11 +65,38 @@ func TestLoadBuildsListenAddrAndDataDir(t *testing.T) {
 			if cfg.DefaultModel != "gpt-6-astra" {
 				t.Fatalf("Load() default model = %q, want gpt-6-astra", cfg.DefaultModel)
 			}
+			if cfg.StickyThreadTTL != 30*time.Minute {
+				t.Fatalf("Load() sticky thread TTL = %s, want 30m", cfg.StickyThreadTTL)
+			}
 			wantDataDir := filepath.Join(cwd, tc.wantData)
 			if cfg.DataDir != wantDataDir {
 				t.Fatalf("Load() data dir = %q, want %q", cfg.DataDir, wantDataDir)
 			}
 		})
+	}
+}
+
+func TestLoadParsesStickyThreadTTL(t *testing.T) {
+	t.Setenv("PROXY_API_KEY", "test-key")
+	t.Setenv("STICKY_THREAD_TTL", "45m")
+	t.Chdir(t.TempDir())
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.StickyThreadTTL != 45*time.Minute {
+		t.Fatalf("StickyThreadTTL = %s, want 45m", cfg.StickyThreadTTL)
+	}
+}
+
+func TestLoadRejectsInvalidStickyThreadTTL(t *testing.T) {
+	t.Setenv("PROXY_API_KEY", "test-key")
+	t.Setenv("STICKY_THREAD_TTL", "0s")
+	t.Chdir(t.TempDir())
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want invalid STICKY_THREAD_TTL error")
 	}
 }
 
