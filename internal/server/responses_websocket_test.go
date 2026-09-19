@@ -146,6 +146,55 @@ func TestResponsesWebSocketReusesUpstreamConnectionForContinuation(t *testing.T)
 	}
 }
 
+func TestResponsesWebSocketFailsOverBeforeFirstVisibleEvent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	failed := &fakeResponsesWebSocketStream{turns: [][]*codex.StreamEvent{{{
+		Type: "response.failed",
+		Raw: map[string]any{"response": map[string]any{"error": map[string]any{
+			"code": "rate_limited", "message": "try the next account", "status": http.StatusTooManyRequests,
+		}}},
+	}}}}
+	success := &fakeResponsesWebSocketStream{turns: [][]*codex.StreamEvent{
+		responsesWebSocketTextEvents("resp_ws_failover", "gpt-5.6-terra", "recovered"),
+	}}
+	app := newResponsesWebSocketTestApp(t, failed)
+	if _, err := app.accounts.UpsertFromToken("upstream_ws_b", accounts.OAuthToken{AccessToken: "token-b", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatalf("UpsertFromToken() error = %v", err)
+	}
+	connects := 0
+	app.wsConnector = func(_ context.Context, _ string, _ http.Header, body any) (responsesWebSocketStream, error) {
+		stream := failed
+		if connects > 0 {
+			stream = success
+		}
+		connects++
+		stream.mu.Lock()
+		stream.connects++
+		stream.mu.Unlock()
+		if err := stream.begin(body); err != nil {
+			return nil, err
+		}
+		return stream, nil
+	}
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	conn, _, err := websocket.DefaultDialer.Dial(websocketTestURL(server.URL)+"/v1/responses", http.Header{"Authorization": []string{"Bearer test-key"}})
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	if err := conn.WriteJSON(map[string]any{"type": "response.create", "model": "gpt-5.6-terra", "input": "recover"}); err != nil {
+		t.Fatalf("WriteJSON() error = %v", err)
+	}
+	events := readResponsesWebSocketTurn(t, conn)
+	assertResponsesWebSocketEventTypes(t, events, "response.created", "response.output_text.delta", "response.completed")
+	if failed.connects != 1 || success.connects != 1 {
+		t.Fatalf("upstream connects = failed %d, success %d; want one each", failed.connects, success.connects)
+	}
+}
+
 func TestResponsesWebSocketContinuesAfterIncompleteResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
