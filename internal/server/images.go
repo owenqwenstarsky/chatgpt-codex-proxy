@@ -81,11 +81,12 @@ func (a *App) handleImageGenerations(c *gin.Context) {
 		a.writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", "prompt is required", "invalid_request_error")
 		return
 	}
+	middleware.SetActivityModel(c, req.Model)
 	if !a.validateImageModel(c, req.Model) {
 		return
 	}
 	req.Model = resolvedImageModel(req.Model)
-	middleware.SetRequestActivityModel(c, req.Model)
+	middleware.SetActivityModel(c, req.Model)
 	directPayload, err := prepareDirectImagePayload(body, req.Model, req.Stream)
 	if err != nil {
 		a.respondOpenAIInvalidRequest(c, err)
@@ -112,6 +113,7 @@ func (a *App) handleImageEdits(c *gin.Context) {
 		a.writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", "prompt is required", "invalid_request_error")
 		return
 	}
+	middleware.SetActivityModel(c, req.Model)
 	if !a.validateImageModel(c, req.Model) {
 		return
 	}
@@ -120,7 +122,7 @@ func (a *App) handleImageEdits(c *gin.Context) {
 		return
 	}
 	req.Model = resolvedImageModel(req.Model)
-	middleware.SetRequestActivityModel(c, req.Model)
+	middleware.SetActivityModel(c, req.Model)
 	directPayload, err = prepareDirectImagePayload(directPayload, req.Model, req.Stream)
 	if err != nil {
 		a.respondOpenAIInvalidRequest(c, err)
@@ -395,7 +397,7 @@ func (a *App) collectImageResponse(c *gin.Context, endpoint, responseFormat stri
 		}
 	}
 	a.accounts.NoteSuccess(opened.Account.ID)
-	middleware.SetRequestActivityFinalizing(c)
+	middleware.MarkActivityFinalizing(c)
 	c.JSON(http.StatusOK, imagesResponse{
 		Background:   strings.TrimSpace(jsonutil.StringValue(metadata["background"])),
 		Created:      imageCreatedAt(accumulator),
@@ -436,6 +438,7 @@ func (a *App) streamImageResponse(c *gin.Context, endpoint, streamPrefix, respon
 		if event.Type != "response.completed" {
 			continue
 		}
+		middleware.MarkActivityFinalizing(c)
 
 		results := imageResultsFromAccumulator(accumulator, responseFormat)
 		if len(results) == 0 {

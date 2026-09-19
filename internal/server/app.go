@@ -24,23 +24,24 @@ import (
 )
 
 type App struct {
-	cfg             config.Config
-	logger          *slog.Logger
-	engine          *gin.Engine
-	accounts        *accounts.Service
-	deviceLogins    *devicelogin.DeviceLoginService
-	accountMgr      *accountmanager.AccountManager
-	httpClient      *codex.HTTPClient
-	httpStream      func(context.Context, accounts.Record, codex.Request, string) (eventStream, error)
-	compactCaller   func(context.Context, accounts.Record, codex.CompactRequest) (codex.CompactResponse, *accounts.QuotaSnapshot, error)
-	imageOpener     func(*gin.Context, string, turn.NormalizedRequest) (openedRequest, bool)
-	directImageOpen func(context.Context, accounts.Record, string, []byte, bool) (*http.Response, error)
-	wsConnector     responsesWebSocketConnector
-	continuations   *conversation.ContinuationManager
-	claudeReplays   *anthropic.ReplayManager
-	models          *models.Catalog
-	activity        *activity.Store
-	cancel          context.CancelFunc
+	cfg               config.Config
+	logger            *slog.Logger
+	engine            *gin.Engine
+	accounts          *accounts.Service
+	deviceLogins      *devicelogin.DeviceLoginService
+	accountMgr        *accountmanager.AccountManager
+	httpClient        *codex.HTTPClient
+	httpStream        func(context.Context, accounts.Record, codex.Request, string) (eventStream, error)
+	compactCaller     func(context.Context, accounts.Record, codex.CompactRequest) (codex.CompactResponse, *accounts.QuotaSnapshot, error)
+	imageOpener       func(*gin.Context, string, turn.NormalizedRequest) (openedRequest, bool)
+	directImageOpen   func(context.Context, accounts.Record, string, []byte, bool) (*http.Response, error)
+	wsConnector       responsesWebSocketConnector
+	continuations     *conversation.ContinuationManager
+	claudeReplays     *anthropic.ReplayManager
+	models            *models.Catalog
+	activity          *activity.Store
+	activityHeartbeat time.Duration
+	cancel            context.CancelFunc
 }
 
 func New(cfg config.Config, logger *slog.Logger) (*App, error) {
@@ -63,14 +64,15 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 	accountMgr := accountmanager.NewAccountManager(cfg, accountsSvc, oauthSvc, httpClient, modelCatalog.SupportsRecord)
 	deviceLogins := devicelogin.NewDeviceLoginService(oauthSvc, accountsSvc, cfg.LoginTimeout)
 	modelRefresher := models.NewFetcher(cfg, logger, accountsSvc, accountMgr, httpClient, modelCatalog)
-	activityStore, err := activity.NewStore(cfg.DataDir)
-	if err != nil {
-		return nil, err
-	}
 
 	engine := gin.New()
 	engine.SetTrustedProxies(nil)
+	activityStore := activity.NewStore(cfg.DataDir, activity.Options{})
+	if err := activityStore.PruneLogs(); err != nil {
+		logger.Warn("prune request activity logs failed", "error", err.Error())
+	}
 	engine.Use(middleware.RequestID())
+	engine.Use(middleware.RequestActivity(activityStore, logger))
 	engine.Use(middleware.RequestLogger(logger))
 	engine.Use(middleware.Recovery(logger))
 
@@ -103,6 +105,7 @@ func (a *App) Handler() http.Handler {
 
 func (a *App) Close() {
 	a.cancel()
+	a.activity.Close()
 	a.httpClient.Close()
 }
 
@@ -121,7 +124,10 @@ func (a *App) housekeeping(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-sweeps:
-			a.activity.Sweep(time.Now().UTC())
+			a.activity.Sweep()
+			if err := a.activity.PruneLogs(); err != nil {
+				a.logger.Warn("prune request activity logs failed", "error", err.Error())
+			}
 			a.continuations.Sweep()
 			a.accounts.SweepThreadAffinities()
 			a.claudeReplays.Sweep()

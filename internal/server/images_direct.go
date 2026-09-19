@@ -72,6 +72,7 @@ func (a *App) handleDirectImageResponse(c *gin.Context, endpoint, path string, p
 			delete(body, "created")
 		}
 		prepareStreamResponse(c)
+		middleware.MarkActivityFinalizing(c)
 		for _, result := range results {
 			payload := jsonutil.CloneMap(body)
 			maps.Copy(payload, result)
@@ -99,6 +100,7 @@ func (a *App) handleDirectImageResponse(c *gin.Context, endpoint, path string, p
 				break
 			}
 		}
+		middleware.MarkActivityFinalizing(c)
 	} else {
 		body, readErr := io.ReadAll(response.Body)
 		if readErr != nil {
@@ -108,7 +110,7 @@ func (a *App) handleDirectImageResponse(c *gin.Context, endpoint, path string, p
 		if contentType == "" {
 			contentType = "application/json"
 		}
-		middleware.SetRequestActivityFinalizing(c)
+		middleware.MarkActivityFinalizing(c)
 		c.Data(http.StatusOK, contentType, body)
 	}
 	a.accounts.NoteSuccess(account.ID)
@@ -140,11 +142,13 @@ func (a *App) openDirectImageWithFailover(ctx context.Context, c *gin.Context, e
 			return account, nil, err
 		}
 		selected := account
+		a.setRequestAccount(c, selected)
 		account, err = a.accountMgr.EnsureReady(ctx, selected.ID)
 		if err != nil {
 			account = selected
 		}
 		if err == nil {
+			a.setRequestAccount(c, account)
 			a.logUpstreamPayload(c, endpoint, "http", account.ID, json.RawMessage(payload))
 			open := a.directImageOpen
 			if open == nil {

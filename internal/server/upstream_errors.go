@@ -16,6 +16,7 @@ import (
 
 func (a *App) writeOpenAIError(c *gin.Context, status int, code, message, errType string) {
 	middleware.SetRequestError(c, code, message)
+	middleware.MarkActivityFinalizing(c)
 	c.AbortWithStatusJSON(status, middleware.OpenAIErrorPayload(message, errType, code, ""))
 }
 

@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -10,101 +11,105 @@ import (
 	"chatgpt-codex-proxy/internal/activity"
 )
 
-const requestActivityStoreKey = "request_activity_store"
+const requestActivityKey = "request_activity"
 
-var trackedRequestPaths = map[string]struct{}{
-	"/v1/completions":        {},
-	"/v1/chat/completions":   {},
-	"/v1/responses":          {},
-	"/v1/responses/compact":  {},
-	"/v1/images/generations": {},
-	"/v1/images/edits":       {},
-	"/v1/messages":           {},
+type requestActivity struct {
+	store *activity.Store
+	id    string
+}
+
+var trackedInferenceRoutes = map[string]string{
+	http.MethodPost + " /v1/completions":        "/v1/completions",
+	http.MethodPost + " /v1/chat/completions":   "/v1/chat/completions",
+	http.MethodPost + " /v1/responses":          "/v1/responses",
+	http.MethodPost + " /v1/responses/compact":  "/v1/responses/compact",
+	http.MethodPost + " /v1/images/generations": "/v1/images/generations",
+	http.MethodPost + " /v1/images/edits":       "/v1/images/edits",
+	http.MethodPost + " /v1/messages":           "/v1/messages",
 }
 
 func RequestActivity(store *activity.Store, logger *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if store == nil || !tracksActivity(c.Request.Method, c.Request.URL.Path) {
+		route, tracked := trackedInferenceRoutes[c.Request.Method+" "+c.Request.URL.Path]
+		if !tracked || store == nil {
 			c.Next()
 			return
 		}
 
-		requestID := GetRequestID(c)
-		c.Set(requestActivityStoreKey, store)
-		store.Start(requestID, c.Request.URL.Path)
+		id := GetRequestID(c)
+		if _, started := store.Start(id, route); !started {
+			if logger != nil {
+				logger.Warn("request activity start skipped", "request_id", id, "route", route)
+			}
+			c.Next()
+			return
+		}
+		c.Set(requestActivityKey, &requestActivity{store: store, id: id})
 		c.Next()
 
-		route := c.FullPath()
-		if route == "" {
-			route = c.Request.URL.Path
+		if fullPath := strings.TrimSpace(c.FullPath()); fullPath != "" {
+			store.SetRoute(id, fullPath)
 		}
-		status := c.Writer.Status()
-		outcome := activityOutcome(c.GetString(RequestOutcomeKey), status)
-		if err := store.Finish(
-			requestID,
-			route,
-			status,
-			outcome,
-			c.GetString(RequestErrorCodeKey),
-			c.GetString(RequestErrorMessageKey),
-		); err != nil && logger != nil {
-			logger.Error("persist request activity failed", "request_id", requestID, "error", err.Error())
+		outcome := classifyActivityOutcome(c)
+		var status *int
+		if c.Writer.Written() || (outcome != activity.OutcomeCancelled && outcome != activity.OutcomeTimedOut) {
+			value := c.Writer.Status()
+			status = &value
+		}
+		_, finished, err := store.Finish(id, activity.FinishInput{
+			Outcome:   outcome,
+			Status:    status,
+			ErrorCode: c.GetString(RequestErrorCodeKey),
+		})
+		if err != nil && logger != nil {
+			logger.Error("persist request activity failed", "request_id", id, "error", err.Error())
+		}
+		if !finished && logger != nil {
+			logger.Warn("request activity finish skipped", "request_id", id)
 		}
 	}
 }
 
-func SetRequestActivityModel(c *gin.Context, model string) {
-	updateRequestActivity(c, func(record *activity.Record) {
-		record.Model = truncateActivityValue(model)
-	})
-}
-
-func SetRequestActivityAccount(c *gin.Context, accountID, accountLabel string) {
-	updateRequestActivity(c, func(record *activity.Record) {
-		record.AccountID = truncateActivityValue(accountID)
-		record.AccountLabel = truncateActivityValue(accountLabel)
-		record.Phase = activity.PhaseUpstream
-	})
-}
-
-func SetRequestActivityPhase(c *gin.Context, phase activity.Phase) {
-	updateRequestActivity(c, func(record *activity.Record) {
-		record.Phase = phase
-	})
-}
-
-func updateRequestActivity(c *gin.Context, update func(*activity.Record)) {
-	if c == nil || update == nil {
-		return
+func SetActivityModel(c *gin.Context, model string) {
+	if tracker := getRequestActivity(c); tracker != nil {
+		tracker.store.SetModel(tracker.id, model)
 	}
-	value, ok := c.Get(requestActivityStoreKey)
+}
+
+func SetActivityAccount(c *gin.Context, accountID, accountLabel string) {
+	if tracker := getRequestActivity(c); tracker != nil {
+		tracker.store.SetAccount(tracker.id, accountID, accountLabel)
+	}
+}
+
+func SetActivityPhase(c *gin.Context, phase activity.Phase) {
+	if tracker := getRequestActivity(c); tracker != nil {
+		tracker.store.SetPhase(tracker.id, phase)
+	}
+}
+
+func MarkActivityStreaming(c *gin.Context) {
+	SetActivityPhase(c, activity.PhaseStreaming)
+}
+
+func MarkActivityFinalizing(c *gin.Context) {
+	SetActivityPhase(c, activity.PhaseFinalizing)
+}
+
+func getRequestActivity(c *gin.Context) *requestActivity {
+	if c == nil {
+		return nil
+	}
+	value, ok := c.Get(requestActivityKey)
 	if !ok {
-		return
+		return nil
 	}
-	store, ok := value.(*activity.Store)
-	if !ok || store == nil {
-		return
-	}
-	store.Update(GetRequestID(c), update)
+	tracker, _ := value.(*requestActivity)
+	return tracker
 }
 
-func tracksActivity(method, path string) bool {
-	if _, ok := trackedRequestPaths[path]; !ok {
-		return false
-	}
-	return method == http.MethodPost
-}
-
-func SetRequestActivityStreaming(c *gin.Context) {
-	SetRequestActivityPhase(c, activity.PhaseStreaming)
-}
-
-func SetRequestActivityFinalizing(c *gin.Context) {
-	SetRequestActivityPhase(c, activity.PhaseFinalizing)
-}
-
-func activityOutcome(value string, status int) activity.Outcome {
-	switch strings.TrimSpace(value) {
+func classifyActivityOutcome(c *gin.Context) activity.Outcome {
+	switch c.GetString(RequestOutcomeKey) {
 	case "client_canceled":
 		return activity.OutcomeCancelled
 	case "request_timeout":
@@ -112,16 +117,19 @@ func activityOutcome(value string, status int) activity.Outcome {
 	case "upstream_error", "stream_error", "server_error", "request_error":
 		return activity.OutcomeFailed
 	}
-	if status >= http.StatusBadRequest {
+	if c.Request != nil {
+		switch c.Request.Context().Err() {
+		case context.Canceled:
+			return activity.OutcomeCancelled
+		case context.DeadlineExceeded:
+			return activity.OutcomeTimedOut
+		}
+	}
+	if c.GetString(RequestErrorCodeKey) != "" {
+		return activity.OutcomeFailed
+	}
+	if c.Writer.Written() && c.Writer.Status() >= 400 {
 		return activity.OutcomeFailed
 	}
 	return activity.OutcomeSucceeded
-}
-
-func truncateActivityValue(value string) string {
-	value = strings.TrimSpace(value)
-	if len(value) > 200 {
-		return value[:200] + "…"
-	}
-	return value
 }

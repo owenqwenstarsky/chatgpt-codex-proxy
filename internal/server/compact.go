@@ -32,7 +32,7 @@ func (a *App) handleResponsesCompact(c *gin.Context) {
 		a.respondOpenAINormalizeError(c, err)
 		return
 	}
-	middleware.SetRequestActivityModel(c, normalized.Model)
+	middleware.SetActivityModel(c, normalized.Model)
 
 	normalized, preferredAccountID, err := a.resolveCompactRequest(normalized)
 	if err != nil {
@@ -42,6 +42,7 @@ func (a *App) handleResponsesCompact(c *gin.Context) {
 		a.respondOpenAINormalizeError(c, err)
 		return
 	}
+	middleware.SetActivityModel(c, normalized.Model)
 
 	account, upstream, quota, err := a.callCompactWithRecovery(c, c.Request.Context(), preferredAccountID, &normalized)
 	if err != nil {
@@ -59,7 +60,6 @@ func (a *App) handleResponsesCompact(c *gin.Context) {
 		return
 	}
 	a.setRequestAccount(c, account)
-	middleware.SetRequestActivityModel(c, normalized.Model)
 
 	a.observeQuotaSnapshot(account.ID, quota)
 	a.accounts.NoteSuccess(account.ID)
@@ -68,7 +68,7 @@ func (a *App) handleResponsesCompact(c *gin.Context) {
 	if err := openai.PatchResponsesObjectForTuple(response, normalized.TupleSchema); err != nil {
 		a.logTupleReconversionWarning(c, "responses_compact", jsonutil.StringValue(response["id"]), err)
 	}
-	middleware.SetRequestActivityFinalizing(c)
+	middleware.MarkActivityFinalizing(c)
 	c.JSON(http.StatusOK, response)
 }
 
@@ -81,6 +81,7 @@ func (a *App) callCompactWithRecovery(c *gin.Context, ctx context.Context, prefe
 	for {
 		attemptCount++
 		account, err := a.acquireAccountForCompactExcluding(ctx, preferredAccountID, normalized, attempted)
+		a.setRequestAccount(c, account)
 		if err != nil {
 			allow := func(record accounts.Record) bool {
 				if _, tried := attempted[record.ID]; tried {
@@ -99,6 +100,7 @@ func (a *App) callCompactWithRecovery(c *gin.Context, ctx context.Context, prefe
 			}
 			return account, codex.CompactResponse{}, nil, err
 		}
+		middleware.SetActivityModel(c, normalized.Model)
 		payload := normalized.CompactRequest
 		a.logUpstreamPayload(c, "responses_compact", "http", account.ID, payload)
 		caller := a.compactCaller

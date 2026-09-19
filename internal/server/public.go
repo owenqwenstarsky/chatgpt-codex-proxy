@@ -110,7 +110,7 @@ func (a *App) handlePublicRequest(
 		a.respondOpenAINormalizeError(c, err)
 		return
 	}
-	middleware.SetRequestActivityModel(c, normalized.Model)
+	middleware.SetActivityModel(c, normalized.Model)
 
 	opened, ok := a.resolveAndOpenRequest(c, endpoint, normalized)
 	if !ok {
@@ -132,7 +132,7 @@ func (a *App) handlePublicRequest(
 	if err := patchTuple(response, normalized.TupleSchema); err != nil {
 		a.logTupleReconversionWarning(c, endpoint, accumulator.ResponseID, err)
 	}
-	middleware.SetRequestActivityFinalizing(c)
+	middleware.MarkActivityFinalizing(c)
 	c.JSON(http.StatusOK, response)
 }
 
@@ -165,7 +165,6 @@ func (a *App) resolveAndOpenRequest(c *gin.Context, endpoint string, normalized 
 	}
 
 	a.setRequestAccount(c, account)
-	middleware.SetRequestActivityModel(c, resolution.Request.Model)
 	if key := strings.TrimSpace(resolution.ConversationKey); key != "" {
 		c.Set(stickyThreadConversationKey, key)
 	}
@@ -363,9 +362,11 @@ func requestUsesHostedWebSearch(request turn.NormalizedRequest) bool {
 
 func (a *App) openHTTPStream(c *gin.Context, ctx context.Context, endpoint string, resolution *sessionResolution, attempted map[string]struct{}) (accounts.Record, eventStream, *accounts.QuotaSnapshot, error) {
 	account, err := a.acquireAccountForResolutionExcluding(ctx, resolution, attempted)
+	a.setRequestAccount(c, account)
 	if err != nil {
 		return account, nil, nil, err
 	}
+	middleware.SetActivityModel(c, resolution.Request.Model)
 	request := resolution.Request.Request
 	a.logUpstreamPayload(c, endpoint, "http", account.ID, codex.StreamRequestPayload(request))
 	var stream eventStream
@@ -382,9 +383,11 @@ func (a *App) openHTTPStream(c *gin.Context, ctx context.Context, endpoint strin
 
 func (a *App) openWSStream(c *gin.Context, ctx context.Context, endpoint string, resolution *sessionResolution, attempted map[string]struct{}) (accounts.Record, eventStream, *accounts.QuotaSnapshot, error) {
 	account, err := a.acquireAccountForResolutionExcluding(ctx, resolution, attempted)
+	a.setRequestAccount(c, account)
 	if err != nil {
 		return account, nil, nil, err
 	}
+	middleware.SetActivityModel(c, resolution.Request.Model)
 	headers := codex.BuildHeaders(account.Token.AccessToken, codex.HeaderOptions{
 		AccountID:   account.AccountID,
 		Cookies:     account.Cookies,
@@ -525,6 +528,7 @@ func (a *App) streamChatCompletion(c *gin.Context, account accounts.Record, norm
 	}
 
 	a.finalizeSuccessfulStream(account.ID, accumulator, stream)
+	middleware.MarkActivityFinalizing(c)
 
 	finalDelta := map[string]any{}
 	if !textSent {
@@ -643,7 +647,7 @@ func normalizeResponsesBody(body []byte, catalog *models.Catalog) (turn.Normaliz
 }
 
 func prepareStreamResponse(c *gin.Context) {
-	middleware.SetRequestActivityStreaming(c)
+	middleware.MarkActivityStreaming(c)
 	headers := c.Writer.Header()
 	headers.Set("Content-Type", "text/event-stream")
 	headers.Set("Cache-Control", "no-cache, no-transform")
@@ -743,6 +747,7 @@ func (a *App) respondStreamError(c *gin.Context, endpoint, accountID, responseID
 	middleware.SetRequestOutcome(c, "upstream_error")
 	middleware.SetRequestError(c, code, message)
 	middleware.SetRequestResponseID(c, responseID)
+	middleware.MarkActivityFinalizing(c)
 	if endpoint == "responses" {
 		writeResponsesStreamError(c.Writer, status, message)
 		c.Writer.Flush()
@@ -847,7 +852,7 @@ func (a *App) setRequestAccount(c *gin.Context, account accounts.Record) {
 		return
 	}
 	c.Set(middleware.RequestAccountIDKey, account.ID)
-	middleware.SetRequestActivityAccount(c, account.ID, account.Label)
+	middleware.SetActivityAccount(c, account.ID, account.Label)
 	if account.AccountID != "" {
 		c.Set(middleware.RequestUpstreamAccountIDKey, account.AccountID)
 	}

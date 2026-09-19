@@ -2,9 +2,10 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -13,119 +14,139 @@ import (
 	"chatgpt-codex-proxy/internal/activity"
 )
 
-const activityHeartbeatInterval = 15 * time.Second
-
-func (a *App) handleAdminRequestActivity(c *gin.Context) {
+func (a *App) handleRequestActivity(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	c.JSON(http.StatusOK, a.activity.Snapshot())
 }
 
-func (a *App) handleAdminRequestActivityStream(c *gin.Context) {
-	snapshot, events, cancel := a.activity.Subscribe()
-	defer cancel()
+func (a *App) handleRequestActivityStream(c *gin.Context) {
+	snapshot, subscription := a.activity.Subscribe()
+	defer subscription.Close()
 
 	headers := c.Writer.Header()
 	headers.Set("Content-Type", "text/event-stream; charset=utf-8")
 	headers.Set("Cache-Control", "no-cache, no-transform")
 	headers.Set("Connection", "keep-alive")
 	headers.Set("X-Accel-Buffering", "no")
+	headers.Del("Content-Length")
 	c.Status(http.StatusOK)
-	writeActivityEvent(c, "snapshot", activity.Event{Type: "snapshot", Snapshot: &snapshot})
+	c.Writer.WriteHeaderNow()
 
-	heartbeat := time.NewTicker(activityHeartbeatInterval)
+	first := activity.Event{Type: "snapshot", Snapshot: &snapshot}
+	if err := writeActivitySSE(c, first); err != nil {
+		return
+	}
+
+	interval := a.activityHeartbeat
+	if interval <= 0 {
+		interval = 15 * time.Second
+	}
+	heartbeat := time.NewTicker(interval)
 	defer heartbeat.Stop()
 	for {
 		select {
 		case <-c.Request.Context().Done():
 			return
-		case event, ok := <-events:
-			if !ok {
+		case event, ok := <-subscription.Events:
+			if !ok || writeActivitySSE(c, event) != nil {
 				return
 			}
-			writeActivityEvent(c, event.Type, event)
 		case <-heartbeat.C:
-			_, _ = io.WriteString(c.Writer, ": keep-alive\n\n")
+			if _, err := io.WriteString(c.Writer, ": keep-alive\n\n"); err != nil {
+				return
+			}
 			c.Writer.Flush()
 		}
 	}
 }
 
-func (a *App) handleAdminRequestLogDates(c *gin.Context) {
-	days, err := a.activity.Dates()
+func (a *App) handleRequestLogDates(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	response, err := a.activity.ListDates()
 	if err != nil {
-		a.writeAdminError(c, http.StatusInternalServerError, "request_logs_failed", err.Error())
+		a.writeAdminError(c, http.StatusInternalServerError, "request_logs_failed", "request logs are unavailable")
 		return
 	}
-	c.Header("Cache-Control", "no-store")
-	c.JSON(http.StatusOK, gin.H{
-		"days":      days,
-		"fetchedAt": time.Now().UTC().Format(time.RFC3339Nano),
-	})
+	c.JSON(http.StatusOK, response)
 }
 
-func (a *App) handleAdminRequestLogs(c *gin.Context) {
+func (a *App) handleRequestLogs(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	query, code, message := parseActivityLogQuery(c)
+	if code != "" {
+		a.writeAdminError(c, http.StatusBadRequest, code, message)
+		return
+	}
+	response, err := a.activity.QueryLogs(query)
+	if errors.Is(err, activity.ErrInvalidCursor) {
+		a.writeAdminError(c, http.StatusBadRequest, "invalid_cursor", "cursor is invalid for this query")
+		return
+	}
+	if err != nil {
+		a.writeAdminError(c, http.StatusInternalServerError, "request_logs_failed", "request logs are unavailable")
+		return
+	}
+	c.JSON(http.StatusOK, response)
+}
+
+func parseActivityLogQuery(c *gin.Context) (activity.LogQuery, string, string) {
 	date := strings.TrimSpace(c.Query("date"))
-	parsedDate, err := time.Parse(time.DateOnly, date)
-	if err != nil || parsedDate.Format(time.DateOnly) != date {
-		a.writeAdminError(c, http.StatusBadRequest, "invalid_date", "date must be YYYY-MM-DD")
-		return
+	if !activity.ValidateDate(date) {
+		return activity.LogQuery{}, "invalid_date", "date must be a real calendar date in YYYY-MM-DD format"
 	}
-	limit := 50
-	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
-		limit, err = strconv.Atoi(raw)
-		if err != nil || limit < 1 || limit > 100 {
-			a.writeAdminError(c, http.StatusBadRequest, "invalid_limit", "limit must be between 1 and 100")
-			return
+	limit, err := activity.ParseLimit(strings.TrimSpace(c.Query("limit")))
+	if err != nil {
+		return activity.LogQuery{}, "invalid_limit", "limit must be an integer from 1 to 100"
+	}
+	outcome := strings.TrimSpace(c.Query("outcome"))
+	if !activity.ValidateOutcome(outcome) {
+		return activity.LogQuery{}, "invalid_outcome", "outcome is invalid"
+	}
+	values := map[string]string{
+		"cursor":  c.Query("cursor"),
+		"q":       c.Query("q"),
+		"account": c.Query("account"),
+		"model":   c.Query("model"),
+	}
+	for name, value := range values {
+		if len([]rune(value)) > 200 {
+			return activity.LogQuery{}, "invalid_filter", fmt.Sprintf("%s must be 200 characters or fewer", name)
+		}
+		values[name] = strings.TrimSpace(value)
+	}
+	if values["cursor"] != "" {
+		if _, err := activity.DecodeCursor(values["cursor"]); err != nil {
+			return activity.LogQuery{}, "invalid_cursor", "cursor is invalid for this query"
 		}
 	}
-	outcome := activity.Outcome(strings.TrimSpace(c.Query("outcome")))
-	if outcome != "" && !validLogOutcome(outcome) {
-		a.writeAdminError(c, http.StatusBadRequest, "invalid_outcome", "invalid outcome filter")
-		return
-	}
-	for _, value := range []string{c.Query("cursor"), c.Query("q"), c.Query("account"), c.Query("model")} {
-		if len(value) > 200 {
-			a.writeAdminError(c, http.StatusBadRequest, "invalid_filter", "a filter value is too long")
-			return
-		}
-	}
-	page, err := a.activity.Logs(activity.LogQuery{
+	return activity.LogQuery{
 		Date:    date,
 		Limit:   limit,
-		Cursor:  c.Query("cursor"),
-		Query:   c.Query("q"),
-		Outcome: outcome,
-		Account: c.Query("account"),
-		Model:   c.Query("model"),
-	})
-	if err != nil {
-		status := http.StatusInternalServerError
-		code := "request_logs_failed"
-		if err.Error() == "invalid cursor" {
-			status = http.StatusBadRequest
-			code = "invalid_cursor"
-		}
-		a.writeAdminError(c, status, code, err.Error())
-		return
-	}
-	c.Header("Cache-Control", "no-store")
-	c.JSON(http.StatusOK, page)
+		Cursor:  values["cursor"],
+		Q:       values["q"],
+		Outcome: activity.Outcome(outcome),
+		Account: values["account"],
+		Model:   values["model"],
+	}, "", ""
 }
 
-func writeActivityEvent(c *gin.Context, eventName string, event activity.Event) {
+func writeActivitySSE(c *gin.Context, event activity.Event) error {
 	payload, err := json.Marshal(event)
 	if err != nil {
-		return
+		return err
 	}
-	writeSSE(c.Writer, eventName, payload)
+	if _, err := io.WriteString(c.Writer, "event: "+event.Type+"\n"); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(c.Writer, "data: "); err != nil {
+		return err
+	}
+	if _, err := c.Writer.Write(payload); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(c.Writer, "\n\n"); err != nil {
+		return err
+	}
 	c.Writer.Flush()
-}
-
-func validLogOutcome(outcome activity.Outcome) bool {
-	switch outcome {
-	case activity.OutcomeActive, activity.OutcomeSucceeded, activity.OutcomeFailed, activity.OutcomeCancelled, activity.OutcomeTimedOut:
-		return true
-	default:
-		return false
-	}
+	return nil
 }

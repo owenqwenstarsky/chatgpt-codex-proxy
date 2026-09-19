@@ -11,6 +11,7 @@ import (
 
 	"chatgpt-codex-proxy/internal/accounts"
 	"chatgpt-codex-proxy/internal/jsonutil"
+	"chatgpt-codex-proxy/internal/middleware"
 	"chatgpt-codex-proxy/internal/models"
 	"chatgpt-codex-proxy/internal/openai"
 	"chatgpt-codex-proxy/internal/turn"
@@ -94,6 +95,7 @@ func (a *App) streamCompletion(c *gin.Context, account accounts.Record, normaliz
 	}
 
 	a.finalizeSuccessfulStream(account.ID, accumulator, stream)
+	middleware.MarkActivityFinalizing(c)
 	finalText := ""
 	if !textSent {
 		finalText = accumulator.Text()
