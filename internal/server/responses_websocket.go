@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -133,8 +134,10 @@ func (a *App) handleResponsesWebSocketTurn(c *gin.Context, conn *websocket.Conn,
 	if normalized.WebSocketAppend && session.lastResponseID == "" {
 		return writeResponsesWebSocketError(conn, http.StatusBadRequest, "invalid_request_error", "response.append received before response.create", "invalid_request_error", "")
 	}
+	implicitSocketResume := false
 	if normalized.PreviousResponseID == "" && session.lastResponseID != "" && (normalized.WebSocketAppend || !hasPriorAssistantOrToolHistory(normalized.Input)) {
 		normalized.PreviousResponseID = session.lastResponseID
+		implicitSocketResume = true
 	}
 	resolution, err := a.resolveSession(normalized)
 	if err != nil {
@@ -146,80 +149,102 @@ func (a *App) handleResponsesWebSocketTurn(c *gin.Context, conn *websocket.Conn,
 		}
 		return writeResponsesWebSocketError(conn, http.StatusBadRequest, code, err.Error(), "invalid_request_error", param)
 	}
-	if session.stream != nil && resolution.PreferredAccountID == "" {
+	// An append (and the implicit follow-up form used by the public socket) is
+	// stateful at the upstream.  It must remain on the account which owns the
+	// persistent connection, even when another account has spare capacity.
+	if session.stream != nil && resolution.PreferredAccountID == "" && (normalized.WebSocketAppend || implicitSocketResume || resolution.ImplicitResume) {
 		resolution.PreferredAccountID = session.account.ID
+		resolution.ImplicitResume = true
 	}
-
-	account, err := a.acquireAccountForResolutionExcluding(c.Request.Context(), &resolution, nil)
-	if err != nil {
-		status, code, message := a.responsesWebSocketOpenError(c, "", err)
-		return writeResponsesWebSocketError(conn, status, code, message, "api_error", "")
-	}
-	a.setRequestAccount(c, account)
 	if key := strings.TrimSpace(resolution.ConversationKey); key != "" {
 		c.Set(stickyThreadConversationKey, key)
 	}
 
 	body := resolution.Request.ToCodexWSCreatePayload()
-	if session.stream == nil || session.account.ID != account.ID {
-		if session.stream != nil {
-			_ = session.stream.Close()
-		}
-		headers := codex.BuildHeaders(account.Token.AccessToken, codex.HeaderOptions{
-			AccountID:   account.AccountID,
-			Cookies:     account.Cookies,
-			TurnState:   resolution.TurnState,
-			RequestID:   codex.NewRequestID(),
-			IncludeBeta: true,
-		})
-		a.logUpstreamPayload(c, "responses_websocket", "websocket", account.ID, body)
-		stream, connectErr := a.connectResponsesWebSocket(c.Request.Context(), websocketEndpoint(a.cfg.CodexBaseURL), headers, body)
-		if connectErr != nil {
-			session.stream = nil
-			session.account = accounts.Record{}
-			a.noteStickyThreadQuotaFailure(resolution.ConversationKey, account.ID, connectErr)
-			status, code, message := a.responsesWebSocketOpenError(c, account.ID, connectErr)
-			return writeResponsesWebSocketError(conn, status, code, message, "api_error", "")
-		}
-		session.stream = stream
-		session.account = account
-		a.observeQuotaSnapshot(account.ID, codex.ParseQuotaFromHeaders(stream.Headers()))
-	} else {
-		a.logUpstreamPayload(c, "responses_websocket", "websocket", account.ID, body)
-		if err := session.stream.SendJSON(body); err != nil {
-			_ = session.stream.Close()
-			session.stream = nil
-			session.account = accounts.Record{}
-			status, code, message := a.responsesWebSocketOpenError(c, account.ID, err)
-			return writeResponsesWebSocketError(conn, status, code, message, "api_error", "")
-		}
-	}
-
 	accumulator := turn.NewAccumulator(resolution.Request)
 	var tupleTextBuffer strings.Builder
-	for {
-		event, upstreamErr, err := a.nextStreamEvent(c.Request.Context(), account, accumulator, session.stream)
-		if err != nil {
-			if err == io.EOF {
-				err = errIncompleteResponse
+	started := time.Now().UTC()
+	attempted := make(map[string]struct{})
+	attempts := 0
+	var account accounts.Record
+	var firstEvent *codex.StreamEvent
+
+	// Do not expose an event until the upstream has proved that this attempt is
+	// usable.  Before that boundary the request can safely be sent again.
+	for firstEvent == nil {
+		account, err = a.acquireAccountForResolutionExcluding(c.Request.Context(), &resolution, attempted)
+		attempts++
+		if err == nil {
+			a.setRequestAccount(c, account)
+			if session.stream == nil || session.account.ID != account.ID {
+				if session.stream != nil {
+					_ = session.stream.Close()
+				}
+				headers := codex.BuildHeaders(account.Token.AccessToken, codex.HeaderOptions{AccountID: account.AccountID, Cookies: account.Cookies, TurnState: resolution.TurnState, RequestID: codex.NewRequestID(), IncludeBeta: true})
+				a.logUpstreamPayload(c, "responses_websocket", "websocket", account.ID, body)
+				session.stream, err = a.connectResponsesWebSocket(c.Request.Context(), websocketEndpoint(a.cfg.CodexBaseURL), headers, body)
+				if err == nil {
+					session.account = account
+					a.observeQuotaSnapshot(account.ID, codex.ParseQuotaFromHeaders(session.stream.Headers()))
+				}
+			} else {
+				a.logUpstreamPayload(c, "responses_websocket", "websocket", account.ID, body)
+				err = session.stream.SendJSON(body)
 			}
-			if a.recordRequestCancellation(c, account.ID, accumulator.ResponseID, err) {
-				return false
+			if err == nil {
+				var upstreamErr bool
+				firstEvent, upstreamErr, err = a.nextStreamEvent(c.Request.Context(), account, accumulator, session.stream)
+				_ = upstreamErr // classification below is intentionally identical for open and event failures.
 			}
-			if !upstreamErr {
-				_ = session.stream.Close()
-				session.stream = nil
-				session.account = accounts.Record{}
-			}
-			status, code, message := a.classifyUpstreamError(account.ID, err)
+		}
+		if err == nil {
+			break
+		}
+		if err == io.EOF {
+			err = errIncompleteResponse
+		}
+		err = normalizeRequestContextError(c.Request.Context(), err)
+		if a.recordRequestCancellation(c, account.ID, accumulator.ResponseID, err) {
+			return false
+		}
+		if account.ID != "" {
+			a.classifyUpstreamError(account.ID, err)
 			a.noteStickyThreadQuotaFailure(resolution.ConversationKey, account.ID, err)
 			a.logUpstreamStreamFailure(c, "responses_websocket", account.ID, accumulator.ResponseID, err)
-			middleware.SetRequestOutcome(c, "upstream_error")
-			middleware.SetRequestError(c, code, message)
-			middleware.SetRequestResponseID(c, accumulator.ResponseID)
-			return writeResponsesWebSocketError(conn, status, code, message, "api_error", "")
+		}
+		if session.stream != nil {
+			_ = session.stream.Close()
+			session.stream = nil
+			session.account = accounts.Record{}
 		}
 
+		if account.ID != "" && shouldFailoverRequest(err) {
+			attempted[account.ID] = struct{}{}
+			if resolution.ExplicitPrevious || resolution.ImplicitResume {
+				if isRateLimitCapacityFailure(err) {
+					if retry, recoveryErr := a.waitForCapacityRecovery(c.Request.Context(), "responses_websocket", started, attempts, a.recoveryAllowForResolution(&resolution)); recoveryErr != nil {
+						return a.writeResponsesWebSocketRecoveryError(conn, recoveryErr)
+					} else if retry {
+						clear(attempted)
+						continue
+					}
+				}
+				status, code, message := a.responsesWebSocketOpenError(c, account.ID, err)
+				return writeResponsesWebSocketError(conn, status, code, message, "api_error", "")
+			}
+			continue
+		}
+		if retry, recoveryErr := a.waitForCapacityRecovery(c.Request.Context(), "responses_websocket", started, attempts, a.recoveryAllowForResolution(&resolution)); recoveryErr != nil {
+			return a.writeResponsesWebSocketRecoveryError(conn, recoveryErr)
+		} else if retry {
+			clear(attempted)
+			continue
+		}
+		status, code, message := a.responsesWebSocketOpenError(c, account.ID, err)
+		return writeResponsesWebSocketError(conn, status, code, message, "api_error", "")
+	}
+
+	for event := firstEvent; ; {
 		for _, outgoing := range a.responsesStreamEvents(c, accumulator, resolution.Request, &tupleTextBuffer, event) {
 			payload := turn.ResponseEventJSON(outgoing.Type, accumulator.ResponseID, outgoing.Payload)
 			if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
@@ -229,11 +254,60 @@ func (a *App) handleResponsesWebSocketTurn(c *gin.Context, conn *websocket.Conn,
 		if event.IsTerminalResponse() {
 			break
 		}
+		for {
+			event, upstreamErr, err := a.nextStreamEvent(c.Request.Context(), account, accumulator, session.stream)
+			if err != nil {
+				if err == io.EOF {
+					err = errIncompleteResponse
+				}
+				if a.recordRequestCancellation(c, account.ID, accumulator.ResponseID, err) {
+					return false
+				}
+				// A failed turn cannot safely share its upstream connection with a
+				// later client turn, regardless of whether the failure was encoded
+				// as an upstream event or a transport error.
+				_ = upstreamErr
+				_ = session.stream.Close()
+				session.stream = nil
+				session.account = accounts.Record{}
+				status, code, message := a.classifyUpstreamError(account.ID, err)
+				a.noteStickyThreadQuotaFailure(resolution.ConversationKey, account.ID, err)
+				a.logUpstreamStreamFailure(c, "responses_websocket", account.ID, accumulator.ResponseID, err)
+				middleware.SetRequestOutcome(c, "upstream_error")
+				middleware.SetRequestError(c, code, message)
+				middleware.SetRequestResponseID(c, accumulator.ResponseID)
+				return writeResponsesWebSocketError(conn, status, code, message, "api_error", "")
+			}
+
+			for _, outgoing := range a.responsesStreamEvents(c, accumulator, resolution.Request, &tupleTextBuffer, event) {
+				payload := turn.ResponseEventJSON(outgoing.Type, accumulator.ResponseID, outgoing.Payload)
+				if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+					return false
+				}
+			}
+			if event.IsTerminalResponse() {
+				break
+			}
+		}
+		break
 	}
 
 	a.finalizeSuccessfulStream(account.ID, accumulator, session.stream)
 	session.lastResponseID = accumulator.ResponseID
 	return true
+}
+
+func (a *App) writeResponsesWebSocketRecoveryError(conn *websocket.Conn, err error) bool {
+	delay, ok := rateLimitRecoveryRetryAfter(err)
+	if !ok {
+		status, code, message := a.responsesWebSocketOpenError(nil, "", err)
+		return writeResponsesWebSocketError(conn, status, code, message, "api_error", "")
+	}
+	payload := map[string]any{
+		"type": "error", "status": http.StatusTooManyRequests, "retry_after": delay,
+		"error": middleware.OpenAIErrorBody{Message: "all eligible accounts are rate limited; retry later", Type: "api_error", Code: "rate_limited"},
+	}
+	return conn.WriteJSON(payload) == nil
 }
 
 func (a *App) responsesStreamEvents(c *gin.Context, accumulator *turn.Accumulator, normalized turn.NormalizedRequest, tupleTextBuffer *strings.Builder, event *codex.StreamEvent) []turn.ResponseStreamEvent {
