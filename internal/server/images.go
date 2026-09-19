@@ -16,6 +16,7 @@ import (
 
 	"chatgpt-codex-proxy/internal/codex"
 	"chatgpt-codex-proxy/internal/jsonutil"
+	"chatgpt-codex-proxy/internal/middleware"
 	"chatgpt-codex-proxy/internal/openai"
 	"chatgpt-codex-proxy/internal/turn"
 )
@@ -84,6 +85,7 @@ func (a *App) handleImageGenerations(c *gin.Context) {
 		return
 	}
 	req.Model = resolvedImageModel(req.Model)
+	middleware.SetRequestActivityModel(c, req.Model)
 	directPayload, err := prepareDirectImagePayload(body, req.Model, req.Stream)
 	if err != nil {
 		a.respondOpenAIInvalidRequest(c, err)
@@ -118,6 +120,7 @@ func (a *App) handleImageEdits(c *gin.Context) {
 		return
 	}
 	req.Model = resolvedImageModel(req.Model)
+	middleware.SetRequestActivityModel(c, req.Model)
 	directPayload, err = prepareDirectImagePayload(directPayload, req.Model, req.Stream)
 	if err != nil {
 		a.respondOpenAIInvalidRequest(c, err)
@@ -392,6 +395,7 @@ func (a *App) collectImageResponse(c *gin.Context, endpoint, responseFormat stri
 		}
 	}
 	a.accounts.NoteSuccess(opened.Account.ID)
+	middleware.SetRequestActivityFinalizing(c)
 	c.JSON(http.StatusOK, imagesResponse{
 		Background:   strings.TrimSpace(jsonutil.StringValue(metadata["background"])),
 		Created:      imageCreatedAt(accumulator),

@@ -116,6 +116,10 @@ GET    /admin/accounts/:account_id/usage
 POST   /admin/accounts/:account_id/refresh
 GET    /admin/rotation
 PUT    /admin/rotation
+GET    /admin/requests/activity
+GET    /admin/requests/activity/stream
+GET    /admin/requests/logs/dates
+GET    /admin/requests/logs
 ```
 
 Rotation is `least_used`, `round_robin`, `sticky`, or `sticky-thread`. An account is skipped when
@@ -158,8 +162,12 @@ and `STICKY_THREAD_TTL` (`30m`). `RATE_LIMIT_MAX_WAIT` is a positive duration
 and defaults to `2m`.
 
 `${DATA_DIR}` holds `accounts.json` — accounts, OAuth tokens, labels, status,
-quota, cooldowns — and `models-cache.json`. Continuation state and in-flight
-device logins are memory-only and do not survive a restart.
+quota, cooldowns — `models-cache.json`, and 30 days of redacted request
+activity as `request-YYYY-MM-DD.jsonl`. Activity records contain lifecycle
+metadata only; request bodies, response bodies, prompts, credentials, and raw
+upstream error details are never retained. Continuation state, the live
+60-second activity window, and in-flight device logins are memory-only and do
+not survive a restart.
 
 ## How It Works
 
