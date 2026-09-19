@@ -23,6 +23,7 @@ type Config struct {
 	LoginTimeout     time.Duration
 	ContinuationTTL  time.Duration
 	StickyThreadTTL  time.Duration
+	RateLimitMaxWait time.Duration
 	RequestTimeout   time.Duration
 	RefreshSkew      time.Duration
 }
@@ -70,6 +71,15 @@ func Load() (Config, error) {
 		stickyThreadTTL = parsed
 	}
 
+	rateLimitMaxWait := 2 * time.Minute
+	if raw := strings.TrimSpace(os.Getenv("RATE_LIMIT_MAX_WAIT")); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil || parsed <= 0 {
+			return Config{}, fmt.Errorf("RATE_LIMIT_MAX_WAIT must be a positive duration")
+		}
+		rateLimitMaxWait = parsed
+	}
+
 	cfg := Config{
 		ListenAddr:       ":" + strconv.Itoa(portNumber),
 		DataDir:          dataDir,
@@ -82,6 +92,7 @@ func Load() (Config, error) {
 		LoginTimeout:     15 * time.Minute,
 		ContinuationTTL:  time.Hour,
 		StickyThreadTTL:  stickyThreadTTL,
+		RateLimitMaxWait: rateLimitMaxWait,
 		RequestTimeout:   30 * time.Minute,
 		RefreshSkew:      time.Minute,
 	}

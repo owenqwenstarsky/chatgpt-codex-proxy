@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +17,26 @@ import (
 func (a *App) writeOpenAIError(c *gin.Context, status int, code, message, errType string) {
 	middleware.SetRequestError(c, code, message)
 	c.AbortWithStatusJSON(status, middleware.OpenAIErrorPayload(message, errType, code, ""))
+}
+
+func (a *App) writeRateLimitRecoveryOpenAIError(c *gin.Context, err error) bool {
+	delay, ok := rateLimitRecoveryRetryAfter(err)
+	if !ok {
+		return false
+	}
+	c.Header("Retry-After", strconv.Itoa(delay))
+	a.writeOpenAIError(c, http.StatusTooManyRequests, "rate_limited", "all eligible accounts are rate limited; retry later", "api_error")
+	return true
+}
+
+func (a *App) writeRateLimitRecoveryAnthropicError(c *gin.Context, err error) bool {
+	delay, ok := rateLimitRecoveryRetryAfter(err)
+	if !ok {
+		return false
+	}
+	c.Header("Retry-After", strconv.Itoa(delay))
+	a.writeAnthropicError(c, http.StatusTooManyRequests, "all eligible accounts are rate limited; retry later")
+	return true
 }
 
 func (a *App) writeAdminError(c *gin.Context, status int, code, message string) {

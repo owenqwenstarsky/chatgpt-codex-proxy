@@ -13,6 +13,58 @@ type memoryStore struct {
 	saveErr error
 }
 
+func TestEarliestAvailabilityUsesTypedCooldownAndQuotaDeadlines(t *testing.T) {
+	now := time.Now().UTC()
+	cooldown := now.Add(2 * time.Minute)
+	quotaReset := now.Add(time.Minute)
+	quotaLimited := recordWithQuota("acct_quota", 100, nil)
+	quotaLimited.CachedQuota.RateLimit.Allowed = false
+	quotaLimited.CachedQuota.RateLimit.LimitReached = true
+	quotaLimited.CachedQuota.RateLimit.ResetAt = &quotaReset
+	disabled := recordWithID("acct_disabled")
+	disabled.Status = StatusDisabled
+	disabledCooldown := now.Add(10 * time.Second)
+	disabled.CooldownUntil = &disabledCooldown
+	withCooldown := recordWithID("acct_cooldown")
+	withCooldown.CooldownUntil = &cooldown
+
+	svc := newTestService(t, RotationLeastUsed, quotaLimited, withCooldown, disabled)
+	availability, err := svc.EarliestAvailability(nil)
+	if err != nil {
+		t.Fatalf("EarliestAvailability() error = %v", err)
+	}
+	if availability.RecoveryAt == nil {
+		t.Fatal("RecoveryAt = nil, want quota reset")
+	}
+	if delta := availability.RecoveryAt.Sub(quotaReset); delta < -time.Second || delta > time.Second {
+		t.Fatalf("RecoveryAt = %s, want %s", availability.RecoveryAt, quotaReset)
+	}
+
+	availability, err = svc.EarliestAvailability(func(record Record) bool { return record.ID == "acct_cooldown" })
+	if err != nil || availability.RecoveryAt == nil {
+		t.Fatalf("filtered EarliestAvailability() = %#v, %v", availability, err)
+	}
+	if delta := availability.RecoveryAt.Sub(cooldown); delta < -time.Second || delta > time.Second {
+		t.Fatalf("filtered RecoveryAt = %s, want %s", availability.RecoveryAt, cooldown)
+	}
+}
+
+func TestEarliestAvailabilityIgnoresUnknownAndPermanentCapacity(t *testing.T) {
+	limited := recordWithID("acct_unknown")
+	limited.CachedQuota = &QuotaSnapshot{RateLimit: RateLimitWindow{Allowed: false, LimitReached: true}}
+	disabled := recordWithID("acct_disabled")
+	disabled.Status = StatusDisabled
+	svc := newTestService(t, RotationLeastUsed, limited, disabled)
+
+	availability, err := svc.EarliestAvailability(nil)
+	if err != nil {
+		t.Fatalf("EarliestAvailability() error = %v", err)
+	}
+	if availability.RecoveryAt != nil {
+		t.Fatalf("RecoveryAt = %s, want nil", availability.RecoveryAt)
+	}
+}
+
 func (m *memoryStore) Load() (State, error) {
 	return m.state, nil
 }
@@ -193,7 +245,7 @@ func TestStickyThreadExpiredAffinityFallsBackToSelection(t *testing.T) {
 	}
 }
 
-func TestStickyThreadReturnsQuotaErrorTwiceThenFallsBack(t *testing.T) {
+func TestStickyThreadImmediatelyReleasesQuotaLimitedAffinity(t *testing.T) {
 	t.Parallel()
 
 	svc := newTestService(t, RotationStickyThread,
@@ -213,20 +265,12 @@ func TestStickyThreadReturnsQuotaErrorTwiceThenFallsBack(t *testing.T) {
 	}
 	svc.NoteThreadSuccess("thread-a", "acct_a")
 
-	first, err := svc.AcquireThread("thread-a", "", nil)
-	if first.ID != "acct_a" || !errors.Is(err, ErrThreadQuotaExhausted) {
-		t.Fatalf("first quota attempt = %q, %v; want acct_a and ErrThreadQuotaExhausted", first.ID, err)
-	}
-	second, err := svc.AcquireThread("thread-a", "", nil)
-	if second.ID != "acct_a" || !errors.Is(err, ErrThreadQuotaExhausted) {
-		t.Fatalf("second quota attempt = %q, %v; want acct_a and ErrThreadQuotaExhausted", second.ID, err)
-	}
-	third, err := svc.AcquireThread("thread-a", "", nil)
+	record, err := svc.AcquireThread("thread-a", "", nil)
 	if err != nil {
-		t.Fatalf("third AcquireThread() error = %v", err)
+		t.Fatalf("AcquireThread() error = %v", err)
 	}
-	if third.ID != "acct_b" {
-		t.Fatalf("third account = %q, want acct_b", third.ID)
+	if record.ID != "acct_b" {
+		t.Fatalf("account = %q, want acct_b", record.ID)
 	}
 }
 

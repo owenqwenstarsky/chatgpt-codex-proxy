@@ -45,7 +45,7 @@ func newFailoverTestApp(t *testing.T) *App {
 	}
 }
 
-func TestStickyThreadReturnsQuotaErrorsBeforeFailingOver(t *testing.T) {
+func TestStickyThreadImmediatelyFailsOverAndRebindsAfterSuccess(t *testing.T) {
 	app := newFailoverTestApp(t)
 	if err := app.accounts.SetRotationStrategy(accounts.RotationStickyThread); err != nil {
 		t.Fatalf("SetRotationStrategy() error = %v", err)
@@ -74,15 +74,11 @@ func TestStickyThreadReturnsQuotaErrorsBeforeFailingOver(t *testing.T) {
 
 	first := request()
 	second := request()
-	third := request()
-	if first.Code != http.StatusPaymentRequired || second.Code != http.StatusPaymentRequired {
-		t.Fatalf("quota response statuses = %d, %d; want 402, 402", first.Code, second.Code)
+	if first.Code != http.StatusOK || second.Code != http.StatusOK {
+		t.Fatalf("response statuses = %d, %d; want 200", first.Code, second.Code)
 	}
-	if third.Code != http.StatusOK {
-		t.Fatalf("third response status = %d, body = %s; want 200", third.Code, third.Body.String())
-	}
-	if len(attempts) != 2 || attempts[0] != "acct-a" || attempts[1] != "acct-b" {
-		t.Fatalf("upstream attempts = %#v, want acct-a then acct-b", attempts)
+	if len(attempts) != 3 || attempts[0] != "acct-a" || attempts[1] != "acct-b" || attempts[2] != "acct-b" {
+		t.Fatalf("upstream attempts = %#v, want acct-a then acct-b then acct-b", attempts)
 	}
 }
 
@@ -109,6 +105,61 @@ func TestOpenStreamFailsOverToAnotherAccount(t *testing.T) {
 	}
 	if len(attempts) != 2 || attempts[0] != "acct-a" || attempts[1] != "acct-b" {
 		t.Fatalf("attempts = %#v, want acct-a then acct-b", attempts)
+	}
+}
+
+func TestOpenStreamWaitsForKnownRateLimitRecovery(t *testing.T) {
+	app := newFailoverTestApp(t)
+	app.cfg.RateLimitMaxWait = 100 * time.Millisecond
+	if err := app.accounts.Remove("acct-b"); err != nil {
+		t.Fatalf("Remove(acct-b) error = %v", err)
+	}
+
+	attempts := 0
+	app.httpStream = func(_ context.Context, account accounts.Record, _ codex.Request, _ string) (eventStream, error) {
+		attempts++
+		if attempts == 1 {
+			reset := time.Now().UTC().Add(10 * time.Millisecond)
+			quota := &accounts.QuotaSnapshot{RateLimit: accounts.RateLimitWindow{Allowed: false, LimitReached: true, ResetAt: &reset}}
+			if err := app.accounts.ObserveQuota(account.ID, quota); err != nil {
+				t.Fatalf("ObserveQuota() error = %v", err)
+			}
+			return nil, &codex.UpstreamError{Op: "codex response", StatusCode: http.StatusTooManyRequests}
+		}
+		return &fakeEventStream{events: []*codex.StreamEvent{{Type: "response.completed", Raw: map[string]any{"response": map[string]any{"id": "resp_recovered", "status": "completed"}}}}}, nil
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.6-terra","input":"hello","stream":false}`))
+	app.handleResponses(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s; want 200", recorder.Code, recorder.Body.String())
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestOpenStreamRateLimitWaitBudgetReturnsRetryAfter(t *testing.T) {
+	app := newFailoverTestApp(t)
+	app.cfg.RateLimitMaxWait = 5 * time.Millisecond
+	if err := app.accounts.Remove("acct-b"); err != nil {
+		t.Fatalf("Remove(acct-b) error = %v", err)
+	}
+	app.httpStream = func(_ context.Context, _ accounts.Record, _ codex.Request, _ string) (eventStream, error) {
+		return nil, &codex.UpstreamError{Op: "codex response", StatusCode: http.StatusTooManyRequests, RetryAfter: 1}
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.6-terra","input":"hello","stream":false}`))
+	app.handleResponses(ctx)
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, body = %s; want 429", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Header().Get("Retry-After") == "" {
+		t.Fatal("Retry-After header is missing")
 	}
 }
 

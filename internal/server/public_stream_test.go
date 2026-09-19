@@ -1,7 +1,6 @@
 package server
 
 import (
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -161,7 +160,7 @@ func TestResponsesStreamQuotaErrorUsesQuotaCode(t *testing.T) {
 	}
 }
 
-func TestStreamingQuotaFailureStartsStickyThreadGrace(t *testing.T) {
+func TestStreamingQuotaFailureReleasesStickyThread(t *testing.T) {
 	t.Parallel()
 
 	app := newFailoverTestApp(t)
@@ -180,8 +179,8 @@ func TestStreamingQuotaFailureStartsStickyThreadGrace(t *testing.T) {
 	}, true)
 
 	record, err := app.accounts.AcquireThread("thread-stream", "", nil)
-	if record.ID != "acct-a" || !errors.Is(err, accounts.ErrThreadQuotaExhausted) {
-		t.Fatalf("next thread request = %q, %v; want acct-a quota error", record.ID, err)
+	if record.ID != "acct-b" || err != nil {
+		t.Fatalf("next thread request = %q, %v; want acct-b", record.ID, err)
 	}
 }
 
