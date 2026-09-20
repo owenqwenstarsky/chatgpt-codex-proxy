@@ -89,6 +89,7 @@ GET  /v1/responses   (WebSocket)  GET  /v1/models/:model_id
 POST /v1/responses/compact        GET  /health
 POST /v1/images/generations       GET  /health/live
 POST /v1/images/edits
+ANY  /noval/v1/*
 ```
 
 Text, image, and file inputs, reasoning, hosted web search, streaming and
@@ -104,6 +105,17 @@ Gotchas:
 
 Exact rules: [docs/TRANSLATION.md](docs/TRANSLATION.md),
 [docs/ANTHROPIC.md](docs/ANTHROPIC.md).
+
+### No-validation passthrough
+
+`/noval/v1/*` is an opaque HTTP passthrough for clients such as Codex and Pi
+that already produce the private Codex request shape. The suffix maps directly
+under the upstream `/codex` namespace: for example,
+`POST /noval/v1/responses` calls `POST /codex/responses`. The proxy does not
+parse or rewrite the body, and relays the upstream status and body as-is. It
+still requires `PROXY_API_KEY`, selects a ready account, replaces client auth
+with that account's upstream credentials, and removes hop-by-hop headers and
+cookies that would expose either side's session.
 
 ## Accounts
 
