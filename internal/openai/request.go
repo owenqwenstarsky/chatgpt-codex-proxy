@@ -393,6 +393,8 @@ func appendResponsesInputItem(out *[]codex.InputItem, instructions *[]string, to
 			ID:               strings.TrimSpace(item.ID),
 			EncryptedContent: strings.TrimSpace(item.EncryptedContent),
 		})
+	case "compaction_trigger":
+		*out = append(*out, codex.InputItem{Type: "compaction_trigger"})
 	case "additional_tools":
 		*out = append(*out, codex.InputItem{
 			Type:  "additional_tools",

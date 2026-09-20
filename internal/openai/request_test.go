@@ -972,6 +972,31 @@ func TestResponsesTranslationRejectsUnknownInputItemType(t *testing.T) {
 	}
 }
 
+func TestResponsesTranslationPreservesCompactionTrigger(t *testing.T) {
+	t.Parallel()
+
+	normalized, err := Responses(ResponsesRequest{
+		Model: "gpt-5.6-terra",
+		Input: ResponsesInput{Items: []ResponsesInputItem{{
+			Type: "compaction_trigger",
+		}}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Responses() error = %v", err)
+	}
+	if len(normalized.Input) != 1 || normalized.Input[0].Type != "compaction_trigger" {
+		t.Fatalf("input = %#v, want one compaction_trigger", normalized.Input)
+	}
+
+	payload, err := json.Marshal(normalized.Input[0])
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if string(payload) != `{"type":"compaction_trigger"}` {
+		t.Fatalf("payload = %s, want payload-free compaction trigger", payload)
+	}
+}
+
 func TestResponsesTranslationAcceptsAssistantOutputTextReplay(t *testing.T) {
 	t.Parallel()
 

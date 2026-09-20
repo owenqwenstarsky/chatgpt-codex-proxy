@@ -82,6 +82,87 @@ func TestStickyThreadImmediatelyFailsOverAndRebindsAfterSuccess(t *testing.T) {
 	}
 }
 
+func TestHandleResponsesStreamsCodexRemoteCompaction(t *testing.T) {
+	t.Parallel()
+
+	app := newFailoverTestApp(t)
+	var upstreamRequest codex.Request
+	app.httpStream = func(_ context.Context, _ accounts.Record, request codex.Request, _ string) (eventStream, error) {
+		upstreamRequest = request
+		return &fakeEventStream{events: []*codex.StreamEvent{
+			{
+				Type: "response.created",
+				Raw: map[string]any{
+					"type": "response.created",
+					"response": map[string]any{
+						"id": "resp_compaction_v2", "model": "gpt-5.6-terra", "status": "in_progress",
+					},
+				},
+			},
+			{
+				Type: "response.output_item.done",
+				Raw: map[string]any{
+					"type":         "response.output_item.done",
+					"output_index": 0,
+					"item": map[string]any{
+						"id": "cmp_remote", "type": "compaction", "encrypted_content": "encrypted_context",
+					},
+				},
+			},
+			{
+				Type: "response.completed",
+				Raw: map[string]any{
+					"type": "response.completed",
+					"response": map[string]any{
+						"id": "resp_compaction_v2", "model": "gpt-5.6-terra", "status": "completed", "output": []any{},
+					},
+				},
+			},
+		}}, nil
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"model":"gpt-5.6-terra",
+		"stream":true,
+		"input":[
+			{"role":"user","content":"Remember the launch code."},
+			{"role":"assistant","content":[{"type":"output_text","text":"MARIGOLD_742"}]},
+			{"type":"compaction_trigger"}
+		]
+	}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	app.handleResponses(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s; want 200", recorder.Code, recorder.Body.String())
+	}
+	if len(upstreamRequest.Input) != 3 || upstreamRequest.Input[2].Type != "compaction_trigger" {
+		t.Fatalf("upstream input = %#v, want final compaction_trigger", upstreamRequest.Input)
+	}
+	triggerPayload, err := json.Marshal(upstreamRequest.Input[2])
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if string(triggerPayload) != `{"type":"compaction_trigger"}` {
+		t.Fatalf("trigger payload = %s", triggerPayload)
+	}
+
+	events := parseSSEEvents(t, recorder.Body.String())
+	assertEventTypes(t, events, "response.created", "response.output_item.done", "response.completed")
+	item := nestedMapFromAny(events[1].Data["item"])
+	if item["type"] != "compaction" || item["encrypted_content"] != "encrypted_context" {
+		t.Fatalf("compaction item = %#v", item)
+	}
+	response := nestedMapFromAny(events[2].Data["response"])
+	output := sliceOfMapsFromAny(response["output"])
+	if response["status"] != "completed" || len(output) != 1 || output[0]["type"] != "compaction" {
+		t.Fatalf("completed response = %#v", response)
+	}
+}
+
 func TestOpenStreamFailsOverToAnotherAccount(t *testing.T) {
 	t.Parallel()
 
