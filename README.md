@@ -103,6 +103,8 @@ Gotchas:
 - Images default to `gpt-image-2`. If the native endpoint returns `404`, `405`, or `501`, it falls back to the Responses image tool — one image, data URL.
 - Anthropic requests need `Anthropic-Version: 2023-06-01`. Sampling controls, stop sequences, `max_tokens` truncation, and thinking budgets are accepted but advisory; Codex has no equivalent.
 - Audio input is rejected. Request bodies must be identity or zstd.
+- HTTP request bodies (including decoded zstd and multipart bodies) are limited
+  to 256 MiB. WebSocket messages are limited to 64 MiB.
 
 Exact rules: [docs/TRANSLATION.md](docs/TRANSLATION.md),
 [docs/ANTHROPIC.md](docs/ANTHROPIC.md).
@@ -183,6 +185,10 @@ user agents, query strings, upstream error bodies, and stack traces are never
 stored or streamed. Records contain only request identity, route, model,
 selected account metadata, lifecycle phase/outcome, timing, status, and safe
 allowlisted failure classifications.
+
+When `DEBUG_LOG_PAYLOADS=true`, diagnostic payload logs retain structural
+fields such as model and streaming options, redact content-bearing fields, and
+truncate each formatted payload at 16 KiB.
 
 ## Deployment
 

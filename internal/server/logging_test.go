@@ -1,6 +1,9 @@
 package server
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestFormatPayloadForLog(t *testing.T) {
 	t.Parallel()
@@ -13,12 +16,22 @@ func TestFormatPayloadForLog(t *testing.T) {
 		{
 			name:  "JSON bytes",
 			value: []byte("{\n  \"hello\": \"world\"\n}\n"),
-			want:  "{\"hello\":\"world\"}",
+			want:  "{\"hello\":\"\\u003credacted\\u003e\"}",
 		},
 		{
 			name:  "map value",
 			value: map[string]any{"stream": true, "model": "gpt-5.6-terra"},
 			want:  "{\"model\":\"gpt-5.6-terra\",\"stream\":true}",
+		},
+		{
+			name:  "sensitive payload fields",
+			value: map[string]any{"model": "gpt-5.6-terra", "input": "private prompt"},
+			want:  "{\"input\":\"\\u003credacted\\u003e\",\"model\":\"gpt-5.6-terra\"}",
+		},
+		{
+			name:  "scalar JSON payload",
+			value: `"private prompt"`,
+			want:  `"\u003credacted\u003e"`,
 		},
 	}
 
@@ -29,5 +42,16 @@ func TestFormatPayloadForLog(t *testing.T) {
 				t.Fatalf("formatPayloadForLog() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestNormalizePayloadStringTruncatesLargeSummary(t *testing.T) {
+	input := `[` + strings.TrimSuffix(strings.Repeat(`"x",`, 3_000), ",") + `]`
+	got := normalizePayloadString([]byte(input))
+	if len(got) != 16<<10 {
+		t.Fatalf("normalizePayloadString() length = %d, want %d", len(got), 16<<10)
+	}
+	if !strings.HasSuffix(got, "...<truncated>") {
+		t.Fatal("normalizePayloadString() does not end with truncation marker")
 	}
 }

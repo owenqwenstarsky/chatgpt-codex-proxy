@@ -46,12 +46,35 @@ func (s *JSONAccountsStore) Save(state accounts.State) error {
 	}
 	payload = append(payload, '\n')
 
-	tmpPath := s.path + ".tmp"
-	if err := os.WriteFile(tmpPath, payload, 0o600); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".accounts-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create tmp accounts store: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod tmp accounts store: %w", err)
+	}
+	if _, err := tmp.Write(payload); err != nil {
+		tmp.Close()
 		return fmt.Errorf("write tmp accounts store: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync tmp accounts store: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close tmp accounts store: %w", err)
 	}
 	if err := os.Rename(tmpPath, s.path); err != nil {
 		return fmt.Errorf("rename accounts store: %w", err)
+	}
+	// Directory syncing is best-effort because some otherwise supported volume
+	// drivers reject fsync on directories. The file itself was synced above.
+	if dir, err := os.Open(filepath.Dir(s.path)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
 	}
 	return nil
 }

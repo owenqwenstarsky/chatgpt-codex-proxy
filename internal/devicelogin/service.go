@@ -16,6 +16,10 @@ type DeviceLoginService struct {
 	accounts *accounts.Service
 	timeout  time.Duration
 	logins   map[string]*pendingLogin
+	ctx      context.Context
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	closed   bool
 }
 
 type pendingLogin struct {
@@ -25,11 +29,14 @@ type pendingLogin struct {
 }
 
 func NewDeviceLoginService(oauth *codexauth.OAuthService, accountsSvc *accounts.Service, timeout time.Duration) *DeviceLoginService {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &DeviceLoginService{
 		oauth:    oauth,
 		accounts: accountsSvc,
 		timeout:  timeout,
 		logins:   make(map[string]*pendingLogin),
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 }
 
@@ -54,10 +61,18 @@ func (s *DeviceLoginService) Start(ctx context.Context) (DeviceLoginRecord, erro
 	}
 
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return DeviceLoginRecord{}, context.Canceled
+	}
 	s.logins[login.LoginID] = login
+	s.wg.Add(1)
 	s.mu.Unlock()
 
-	go s.poll(login)
+	go func() {
+		defer s.wg.Done()
+		s.poll(login)
+	}()
 
 	return login.DeviceLoginRecord, nil
 }
@@ -73,17 +88,18 @@ func (s *DeviceLoginService) Get(loginID string) (DeviceLoginRecord, bool) {
 }
 
 func (s *DeviceLoginService) poll(login *pendingLogin) {
-	ctx, cancel := context.WithDeadline(context.Background(), login.ExpiresAt)
+	ctx, cancel := context.WithDeadline(s.ctx, login.ExpiresAt)
 	defer cancel()
 
-	ticks := time.Tick(login.Interval)
+	ticker := time.NewTicker(login.Interval)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			s.setStatus(login.LoginID, DeviceLoginPending, DeviceLoginExpired, "device login expired")
 			return
-		case <-ticks:
+		case <-ticker.C:
 			result, err := s.oauth.PollDeviceCode(ctx, login.DeviceAuthID, login.UserCode)
 			if err != nil {
 				text := strings.ToLower(err.Error())
@@ -117,6 +133,20 @@ func (s *DeviceLoginService) poll(login *pendingLogin) {
 			return
 		}
 	}
+}
+
+// Close stops pending polling requests and waits for their goroutines to exit.
+// It is safe to call more than once.
+func (s *DeviceLoginService) Close() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	s.cancel()
+	s.mu.Unlock()
+	s.wg.Wait()
 }
 
 func (s *DeviceLoginService) setStatus(loginID string, expected, status DeviceLoginStatus, message string) {

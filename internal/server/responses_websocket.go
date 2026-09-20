@@ -28,6 +28,8 @@ var responsesWebSocketUpgrader = websocket.Upgrader{
 	CheckOrigin: func(*http.Request) bool { return true },
 }
 
+const maxWebSocketMessageBytes = 64 << 20
+
 type responsesWebSocketStream interface {
 	eventStream
 	SendJSON(any) error
@@ -54,6 +56,7 @@ func (a *App) handleResponsesWebSocket(c *gin.Context) {
 		return
 	}
 	defer conn.Close()
+	conn.SetReadLimit(maxWebSocketMessageBytes)
 
 	session := responsesWebSocketSession{}
 	defer func() {

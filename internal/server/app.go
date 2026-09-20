@@ -105,10 +105,21 @@ func (a *App) Handler() http.Handler {
 }
 
 func (a *App) Close() {
-	a.cancel()
-	a.activity.Close()
-	a.accountMgr.Close()
-	a.httpClient.Close()
+	if a.cancel != nil {
+		a.cancel()
+	}
+	if a.deviceLogins != nil {
+		a.deviceLogins.Close()
+	}
+	if a.accountMgr != nil {
+		a.accountMgr.Close()
+	}
+	if a.activity != nil {
+		a.activity.Close()
+	}
+	if a.httpClient != nil {
+		a.httpClient.Close()
+	}
 }
 
 func (a *App) modelCatalog() *models.Catalog {
