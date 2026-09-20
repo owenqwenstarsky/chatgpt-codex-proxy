@@ -90,14 +90,15 @@ func (f *Fetcher) refreshOnce(ctx context.Context) bool {
 	anySuccess := false
 	for _, key := range keys {
 		record := routes[key]
-		ready, err := f.accountMgr.EnsureReady(ctx, record.ID)
+		lease, err := f.accountMgr.AcquireSpecificLease(ctx, record.ID, true)
 		if err != nil {
 			f.logger.Warn("codex model fetch ensure-ready failed", "route_key", key, "account_id", record.ID, "error", err.Error())
 			continue
 		}
-		entries, err := f.http.GetCodexModels(ctx, ready)
+		entries, err := f.http.GetCodexModels(ctx, lease.Account)
+		lease.Release()
 		if err != nil {
-			f.logger.Warn("codex model fetch failed", "route_key", key, "account_id", ready.ID, "error", err.Error())
+			f.logger.Warn("codex model fetch failed", "route_key", key, "account_id", lease.Account.ID, "error", err.Error())
 			continue
 		}
 		normalized := NormalizeBackendEntries(entries)

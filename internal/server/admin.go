@@ -13,35 +13,41 @@ import (
 )
 
 type adminAccountResponse struct {
-	ID            string                  `json:"id"`
-	UpstreamID    string                  `json:"upstream_account_id"`
-	UserID        string                  `json:"user_id,omitempty"`
-	Email         string                  `json:"email,omitempty"`
-	PlanType      string                  `json:"plan_type,omitempty"`
-	Label         string                  `json:"label,omitempty"`
-	Status        accounts.Status         `json:"status"`
-	EligibleNow   bool                    `json:"eligible_now"`
-	CooldownUntil *time.Time              `json:"cooldown_until,omitempty"`
-	LastError     string                  `json:"last_error,omitempty"`
-	CachedQuota   *accounts.QuotaSnapshot `json:"cached_quota,omitempty"`
-	OauthExpires  time.Time               `json:"oauth_expires"`
-	CreatedAt     time.Time               `json:"created_at"`
-	UpdatedAt     time.Time               `json:"updated_at"`
+	ID                string                  `json:"id"`
+	UpstreamID        string                  `json:"upstream_account_id"`
+	UserID            string                  `json:"user_id,omitempty"`
+	Email             string                  `json:"email,omitempty"`
+	PlanType          string                  `json:"plan_type,omitempty"`
+	Label             string                  `json:"label,omitempty"`
+	Status            accounts.Status         `json:"status"`
+	EligibleNow       bool                    `json:"eligible_now"`
+	CooldownUntil     *time.Time              `json:"cooldown_until,omitempty"`
+	LastError         string                  `json:"last_error,omitempty"`
+	CachedQuota       *accounts.QuotaSnapshot `json:"cached_quota,omitempty"`
+	OauthExpires      time.Time               `json:"oauth_expires"`
+	CreatedAt         time.Time               `json:"created_at"`
+	UpdatedAt         time.Time               `json:"updated_at"`
+	ActiveRequests    int                     `json:"active_requests"`
+	QueuedRequests    int                     `json:"queued_requests"`
+	MaxActiveRequests int                     `json:"max_active_requests"`
 }
 
 type adminAccountUsageResponse struct {
-	AccountID      string                  `json:"account_id"`
-	UpstreamID     string                  `json:"upstream_account_id"`
-	UserID         string                  `json:"user_id,omitempty"`
-	Status         accounts.Status         `json:"status"`
-	EligibleNow    bool                    `json:"eligible_now"`
-	CooldownUntil  *time.Time              `json:"cooldown_until,omitempty"`
-	LastError      string                  `json:"last_error,omitempty"`
-	CachedQuota    *accounts.QuotaSnapshot `json:"cached_quota,omitempty"`
-	QuotaRuntime   *accounts.QuotaSnapshot `json:"quota_runtime,omitempty"`
-	QuotaSource    string                  `json:"quota_source,omitempty"`
-	QuotaFetchedAt *time.Time              `json:"quota_fetched_at,omitempty"`
-	OauthExpires   time.Time               `json:"oauth_expires"`
+	AccountID         string                  `json:"account_id"`
+	UpstreamID        string                  `json:"upstream_account_id"`
+	UserID            string                  `json:"user_id,omitempty"`
+	Status            accounts.Status         `json:"status"`
+	EligibleNow       bool                    `json:"eligible_now"`
+	CooldownUntil     *time.Time              `json:"cooldown_until,omitempty"`
+	LastError         string                  `json:"last_error,omitempty"`
+	CachedQuota       *accounts.QuotaSnapshot `json:"cached_quota,omitempty"`
+	QuotaRuntime      *accounts.QuotaSnapshot `json:"quota_runtime,omitempty"`
+	QuotaSource       string                  `json:"quota_source,omitempty"`
+	QuotaFetchedAt    *time.Time              `json:"quota_fetched_at,omitempty"`
+	OauthExpires      time.Time               `json:"oauth_expires"`
+	ActiveRequests    int                     `json:"active_requests"`
+	QueuedRequests    int                     `json:"queued_requests"`
+	MaxActiveRequests int                     `json:"max_active_requests"`
 }
 
 func (a *App) handleAdminAccounts(c *gin.Context) {
@@ -67,11 +73,13 @@ func (a *App) adminAccountView(record accounts.Record) (adminAccountResponse, er
 	if err != nil {
 		return adminAccountResponse{}, err
 	}
+	capacity := a.accountMgr.Capacity(record.ID)
 	return adminAccountResponse{
 		ID: record.ID, UpstreamID: record.AccountID, UserID: record.UserID, Email: record.Email,
 		PlanType: record.PlanType, Label: record.Label, Status: record.Status, EligibleNow: eligible,
 		CooldownUntil: record.CooldownUntil, LastError: record.LastError, CachedQuota: record.CachedQuota,
 		OauthExpires: record.Token.ExpiresAt, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
+		ActiveRequests: capacity.Active, QueuedRequests: capacity.Queued, MaxActiveRequests: capacity.Limit,
 	}, nil
 }
 
@@ -164,6 +172,7 @@ func (a *App) handleAdminAccountUsage(c *gin.Context) {
 			quotaFetchedAt = &ts
 		}
 	}
+	capacity := a.accountMgr.Capacity(record.ID)
 	c.JSON(http.StatusOK, adminAccountUsageResponse{
 		AccountID:      record.ID,
 		UpstreamID:     record.AccountID,
@@ -177,6 +186,7 @@ func (a *App) handleAdminAccountUsage(c *gin.Context) {
 		QuotaSource:    quotaSource,
 		QuotaFetchedAt: quotaFetchedAt,
 		OauthExpires:   record.Token.ExpiresAt,
+		ActiveRequests: capacity.Active, QueuedRequests: capacity.Queued, MaxActiveRequests: capacity.Limit,
 	})
 }
 

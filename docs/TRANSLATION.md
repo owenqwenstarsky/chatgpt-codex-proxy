@@ -644,6 +644,12 @@ During streaming, classified errors are sent as SSE error payloads instead of ra
 
 For requests without explicit continuation state, retryable upstream failures (`401`, `402`, `403`, `408`, `429`, and transient `5xx` statuses) fail over to another eligible account before client-visible output begins. Each account is attempted at most once per recovery pass. When 402/429 exhausts all model-compatible capacity, the proxy waits for the earliest typed cooldown or quota-reset deadline for up to `RATE_LIMIT_MAX_WAIT` (default `2m`) and then refreshes selection. A wait-budget expiry is a 429 with `Retry-After`; permanently unusable capacity remains a 503. Explicit `previous_response_id` continuations wait and retry their original account instead of migrating. Non-streaming responses remain retryable until the full upstream response has been buffered; streaming responses stop being retryable after the first public event is ready for delivery.
 
+Separately, each account admits at most `MAX_ACTIVE_REQUESTS_PER_ACCOUNT`
+active upstream operations (default `2`). Compatible accounts with free slots
+are preferred; otherwise work waits in that account's process-local FIFO queue.
+Persistent Responses WebSockets hold a slot only for an active turn and keep
+their upstream connection reusable while idle.
+
 If the upstream rejects replayed reasoning state with an invalid-signature error (`thinking_signature_invalid` or `invalid_encrypted_content`), the proxy drops the `reasoning` input items that carry `encrypted_content` and retries the request once on the same account before client-visible output begins. This applies to the Chat Completions and Responses paths as well as Anthropic Messages, so a replayed transcript whose encrypted reasoning was produced by a different account (for example after account rotation) recovers transparently instead of surfacing the error.
 
 ## State Recorded From Responses

@@ -12,20 +12,21 @@ import (
 )
 
 type Config struct {
-	ListenAddr       string
-	DataDir          string
-	ProxyAPIKey      string
-	DebugLogPayloads bool
-	DefaultModel     string
-	CodexBaseURL     string
-	AuthIssuer       string
-	OAuthClientID    string
-	LoginTimeout     time.Duration
-	ContinuationTTL  time.Duration
-	StickyThreadTTL  time.Duration
-	RateLimitMaxWait time.Duration
-	RequestTimeout   time.Duration
-	RefreshSkew      time.Duration
+	ListenAddr                  string
+	DataDir                     string
+	ProxyAPIKey                 string
+	DebugLogPayloads            bool
+	DefaultModel                string
+	CodexBaseURL                string
+	AuthIssuer                  string
+	OAuthClientID               string
+	LoginTimeout                time.Duration
+	ContinuationTTL             time.Duration
+	StickyThreadTTL             time.Duration
+	RateLimitMaxWait            time.Duration
+	MaxActiveRequestsPerAccount int
+	RequestTimeout              time.Duration
+	RefreshSkew                 time.Duration
 }
 
 func Load() (Config, error) {
@@ -80,21 +81,31 @@ func Load() (Config, error) {
 		rateLimitMaxWait = parsed
 	}
 
+	maxActiveRequestsPerAccount := 2
+	if raw := strings.TrimSpace(os.Getenv("MAX_ACTIVE_REQUESTS_PER_ACCOUNT")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			return Config{}, fmt.Errorf("MAX_ACTIVE_REQUESTS_PER_ACCOUNT must be a positive integer")
+		}
+		maxActiveRequestsPerAccount = parsed
+	}
+
 	cfg := Config{
-		ListenAddr:       ":" + strconv.Itoa(portNumber),
-		DataDir:          dataDir,
-		ProxyAPIKey:      strings.TrimSpace(os.Getenv("PROXY_API_KEY")),
-		DebugLogPayloads: debugLogPayloads,
-		DefaultModel:     "gpt-6-astra",
-		CodexBaseURL:     "https://chatgpt.com/backend-api",
-		AuthIssuer:       "https://auth.openai.com",
-		OAuthClientID:    "app_EMoamEEZ73f0CkXaXp7hrann",
-		LoginTimeout:     15 * time.Minute,
-		ContinuationTTL:  time.Hour,
-		StickyThreadTTL:  stickyThreadTTL,
-		RateLimitMaxWait: rateLimitMaxWait,
-		RequestTimeout:   30 * time.Minute,
-		RefreshSkew:      time.Minute,
+		ListenAddr:                  ":" + strconv.Itoa(portNumber),
+		DataDir:                     dataDir,
+		ProxyAPIKey:                 strings.TrimSpace(os.Getenv("PROXY_API_KEY")),
+		DebugLogPayloads:            debugLogPayloads,
+		DefaultModel:                "gpt-6-astra",
+		CodexBaseURL:                "https://chatgpt.com/backend-api",
+		AuthIssuer:                  "https://auth.openai.com",
+		OAuthClientID:               "app_EMoamEEZ73f0CkXaXp7hrann",
+		LoginTimeout:                15 * time.Minute,
+		ContinuationTTL:             time.Hour,
+		StickyThreadTTL:             stickyThreadTTL,
+		RateLimitMaxWait:            rateLimitMaxWait,
+		MaxActiveRequestsPerAccount: maxActiveRequestsPerAccount,
+		RequestTimeout:              30 * time.Minute,
+		RefreshSkew:                 time.Minute,
 	}
 
 	if cfg.ProxyAPIKey == "" {

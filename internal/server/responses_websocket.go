@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 
+	"chatgpt-codex-proxy/internal/accountmanager"
 	"chatgpt-codex-proxy/internal/accounts"
 	"chatgpt-codex-proxy/internal/codex"
 	"chatgpt-codex-proxy/internal/jsonutil"
@@ -163,16 +164,20 @@ func (a *App) handleResponsesWebSocketTurn(c *gin.Context, conn *websocket.Conn,
 	body := resolution.Request.ToCodexWSCreatePayload()
 	accumulator := turn.NewAccumulator(resolution.Request)
 	var tupleTextBuffer strings.Builder
-	started := time.Now().UTC()
+	var started time.Time
 	attempted := make(map[string]struct{})
 	attempts := 0
 	var account accounts.Record
+	var turnLease *accountmanager.Lease
 	var firstEvent *codex.StreamEvent
 
 	// Do not expose an event until the upstream has proved that this attempt is
 	// usable.  Before that boundary the request can safely be sent again.
 	for firstEvent == nil {
-		account, err = a.acquireAccountForResolutionExcluding(c.Request.Context(), &resolution, attempted)
+		turnLease, err = a.acquireWebSocketTurnLease(c.Request.Context(), conn, &resolution, attempted)
+		if turnLease != nil {
+			account = turnLease.Account
+		}
 		attempts++
 		if err == nil {
 			a.setRequestAccount(c, account)
@@ -200,6 +205,10 @@ func (a *App) handleResponsesWebSocketTurn(c *gin.Context, conn *websocket.Conn,
 		if err == nil {
 			break
 		}
+		if turnLease != nil {
+			turnLease.Release()
+			turnLease = nil
+		}
 		if err == io.EOF {
 			err = errIncompleteResponse
 		}
@@ -222,7 +231,7 @@ func (a *App) handleResponsesWebSocketTurn(c *gin.Context, conn *websocket.Conn,
 			attempted[account.ID] = struct{}{}
 			if resolution.ExplicitPrevious || resolution.ImplicitResume {
 				if isRateLimitCapacityFailure(err) {
-					if retry, recoveryErr := a.waitForCapacityRecovery(c.Request.Context(), "responses_websocket", started, attempts, a.recoveryAllowForResolution(&resolution)); recoveryErr != nil {
+					if retry, recoveryErr := a.waitForCapacityRecovery(c.Request.Context(), "responses_websocket", rateLimitRecoveryStart(&started), attempts, a.recoveryAllowForResolution(&resolution)); recoveryErr != nil {
 						return a.writeResponsesWebSocketRecoveryError(conn, recoveryErr)
 					} else if retry {
 						clear(attempted)
@@ -234,7 +243,7 @@ func (a *App) handleResponsesWebSocketTurn(c *gin.Context, conn *websocket.Conn,
 			}
 			continue
 		}
-		if retry, recoveryErr := a.waitForCapacityRecovery(c.Request.Context(), "responses_websocket", started, attempts, a.recoveryAllowForResolution(&resolution)); recoveryErr != nil {
+		if retry, recoveryErr := a.waitForCapacityRecovery(c.Request.Context(), "responses_websocket", rateLimitRecoveryStart(&started), attempts, a.recoveryAllowForResolution(&resolution)); recoveryErr != nil {
 			return a.writeResponsesWebSocketRecoveryError(conn, recoveryErr)
 		} else if retry {
 			clear(attempted)
@@ -243,6 +252,7 @@ func (a *App) handleResponsesWebSocketTurn(c *gin.Context, conn *websocket.Conn,
 		status, code, message := a.responsesWebSocketOpenError(c, account.ID, err)
 		return writeResponsesWebSocketError(conn, status, code, message, "api_error", "")
 	}
+	defer turnLease.Release()
 
 	for event := firstEvent; ; {
 		for _, outgoing := range a.responsesStreamEvents(c, accumulator, resolution.Request, &tupleTextBuffer, event) {
@@ -295,6 +305,44 @@ func (a *App) handleResponsesWebSocketTurn(c *gin.Context, conn *websocket.Conn,
 	a.finalizeSuccessfulStream(account.ID, accumulator, session.stream)
 	session.lastResponseID = accumulator.ResponseID
 	return true
+}
+
+func (a *App) acquireWebSocketTurnLease(ctx context.Context, conn *websocket.Conn, resolution *sessionResolution, attempted map[string]struct{}) (*accountmanager.Lease, error) {
+	waitCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type result struct {
+		lease *accountmanager.Lease
+		err   error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		lease, err := a.acquireLeaseForResolution(waitCtx, resolution, attempted)
+		resultCh <- result{lease: lease, err: err}
+	}()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case value := <-resultCh:
+			return value.lease, value.err
+		case <-ctx.Done():
+			cancel()
+			value := <-resultCh
+			if value.lease != nil {
+				value.lease.Release()
+			}
+			return nil, ctx.Err()
+		case <-ticker.C:
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)); err != nil {
+				cancel()
+				value := <-resultCh
+				if value.lease != nil {
+					value.lease.Release()
+				}
+				return nil, err
+			}
+		}
+	}
 }
 
 func (a *App) writeResponsesWebSocketRecoveryError(conn *websocket.Conn, err error) bool {

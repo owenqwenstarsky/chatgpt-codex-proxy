@@ -30,6 +30,7 @@ Built for local and small-scale use.
 - **Two API surfaces, one backend** — OpenAI Chat Completions, Responses, and Images plus Anthropic Messages.
 - **Streaming everywhere** — SSE, a persistent WebSocket for Responses, or plain JSON.
 - **Multi-account rotation** — least-used, round-robin, sticky, or sticky-thread, with cooldowns and quota awareness.
+- **Per-account concurrency queues** — free compatible accounts are preferred; excess work waits in a cancelable FIFO queue.
 - **Device login** — add an account by opening a URL. No cookie scraping, no pasted tokens.
 - **Tools and structured output** — custom tools, legacy `functions`, `json_schema`, `json_object`.
 - **Activity and Logbook telemetry** — live request phases over authenticated SSE plus 30 days of redacted daily history.
@@ -196,7 +197,8 @@ docker compose logs -f
 Config is environment-only: `PROXY_API_KEY` (required), `PORT` (`8080`),
 `DATA_DIR` (`data`, or `/app/data` in Docker), `DEBUG_LOG_PAYLOADS` (`false`),
 and `STICKY_THREAD_TTL` (`30m`). `RATE_LIMIT_MAX_WAIT` is a positive duration
-and defaults to `2m`.
+and defaults to `2m`. `MAX_ACTIVE_REQUESTS_PER_ACCOUNT` is a positive integer
+and defaults to `2`; the limit and queue are local to each proxy process.
 
 `${DATA_DIR}` holds `accounts.json` — accounts, OAuth tokens, labels, status,
 quota, cooldowns — `models-cache.json`, and redacted `request-YYYY-MM-DD.jsonl`

@@ -671,6 +671,12 @@ The current rotation system is deliberately small and predictable:
 - One global sticky preference or expiring per-thread affinities
 - Safe in-request failover before client-visible output, except sticky-thread quota holds
 - Explicit continuations require their original account
+- Per-account active work is capped by `MAX_ACTIVE_REQUESTS_PER_ACCOUNT` (default `2`)
+- Capacity-constrained work waits in a process-local, context-cancelable FIFO queue; this is separate from cooldown and quota-reset waiting
+
+Persistent Responses WebSockets count capacity per active turn, so their
+upstream connection remains reusable without consuming a slot while idle. Raw
+`/noval` WebSockets are opaque and hold one slot for their full connection.
 
 If you want to understand why a specific request chose a specific account, the right questions are:
 

@@ -107,6 +107,7 @@ func (a *App) Handler() http.Handler {
 func (a *App) Close() {
 	a.cancel()
 	a.activity.Close()
+	a.accountMgr.Close()
 	a.httpClient.Close()
 }
 
