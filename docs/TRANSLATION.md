@@ -105,6 +105,8 @@ If both `messages` and Responses-style fields are present, `messages` wins.
 
 `POST /v1/responses` binds directly to `openai.ResponsesRequest` and normalizes with `openai.Responses(...)`.
 
+Codex remote compaction v2 also uses this endpoint. Its request includes the existing conversation followed by a payload-free `{"type":"compaction_trigger"}` input item. The proxy preserves that trigger on the upstream Responses stream and relays the resulting encrypted `compaction` output events to the client.
+
 `GET /v1/responses` upgrades to a persistent WebSocket connection. The client sends one JSON `response.create` event per turn. WebSocket streaming is implicit, so a supplied `stream` field is ignored. `background: true` is rejected, while an optional `generate` boolean is forwarded only on the upstream WebSocket payload.
 
 The connection processes turns sequentially. It reuses the same upstream WebSocket while the selected account remains the same; if account selection changes, it closes that upstream connection and opens another one. Each turn ends with `response.completed` or an `error` JSON message. There is no SSE `done` event or `[DONE]` sentinel.
@@ -244,6 +246,7 @@ Responses input is converted like this:
 - `compaction` items preserve:
   - `id`
   - `encrypted_content`
+- `compaction_trigger` is preserved as a payload-free item for streamed Codex remote compaction.
 - Generic role/content items preserve `phase` when present so assistant output messages can be replayed through compaction.
 
 ### Tool Definitions

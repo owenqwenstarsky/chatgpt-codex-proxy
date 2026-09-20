@@ -173,6 +173,7 @@ Implementation notes:
 - The HTTP path always forces `store = false`.
 - The HTTP path clears `previous_response_id` before sending.
 - The websocket path does not use this exact object; it wraps selected request fields in a `response.create` envelope.
+- Codex remote compaction v2 is sent through this Responses path with a final payload-free `{"type":"compaction_trigger"}` input item. The resulting encrypted `compaction` output is streamed back unchanged.
 
 ## Compact Request Object
 
