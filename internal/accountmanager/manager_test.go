@@ -77,6 +77,35 @@ func TestGetUsageCachedBypassesEnsureReady(t *testing.T) {
 	}
 }
 
+func TestAcquireMatchingLeaseHonorsCanceledContextBeforeRetry(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	accountsSvc, err := accounts.NewService(&memoryStore{state: accounts.State{
+		Records: []*accounts.Record{{
+			ID:        "acct_canceled_acquire",
+			AccountID: "upstream_canceled_acquire",
+			Status:    accounts.StatusActive,
+			Token: accounts.OAuthToken{
+				AccessToken: "access-token",
+				ExpiresAt:   now.Add(time.Hour),
+			},
+			CreatedAt: now,
+			UpdatedAt: now,
+		}},
+	}}, accounts.RotationLeastUsed)
+	if err != nil {
+		t.Fatalf("accounts.NewService() error = %v", err)
+	}
+	manager := NewAccountManager(config.Config{}, accountsSvc, nil, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := manager.AcquireMatchingLease(ctx, "", nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("AcquireMatchingLease() error = %v, want context.Canceled", err)
+	}
+}
+
 func TestRefreshKeepsAccountActiveAfterTransientFailure(t *testing.T) {
 	t.Parallel()
 
