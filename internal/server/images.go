@@ -23,6 +23,17 @@ import (
 
 const defaultImageModel = "gpt-image-2"
 
+type discardResponseWriter struct{ header http.Header }
+
+func (w *discardResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+func (w *discardResponseWriter) Write(p []byte) (int, error) { return len(p), nil }
+func (w *discardResponseWriter) WriteHeader(int)             {}
+
 type imageGenerationRequest struct {
 	Model             string `json:"model"`
 	Prompt            string `json:"prompt"`
@@ -157,6 +168,11 @@ func decodeImageEditRequest(req *http.Request) (imageEditRequest, []byte, func()
 		return decoded, body, nil, err
 	}
 
+	const maxMultipartBodyBytes = maxRequestBodyBytes
+	if req.ContentLength > maxMultipartBodyBytes {
+		return imageEditRequest{}, nil, nil, fmt.Errorf("multipart request exceeds %d bytes", maxMultipartBodyBytes)
+	}
+	req.Body = http.MaxBytesReader(&discardResponseWriter{}, req.Body, maxMultipartBodyBytes)
 	if err := req.ParseMultipartForm(32 << 20); err != nil {
 		return imageEditRequest{}, nil, nil, err
 	}

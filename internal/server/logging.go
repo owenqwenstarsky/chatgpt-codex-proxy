@@ -180,9 +180,38 @@ func normalizePayloadString(payload []byte) string {
 	if len(trimmed) == 0 {
 		return ""
 	}
-	var compact bytes.Buffer
-	if json.Valid(trimmed) && json.Compact(&compact, trimmed) == nil {
-		return compact.String()
+	if len(trimmed) > 1<<20 {
+		return fmt.Sprintf("<payload omitted: %d bytes>", len(trimmed))
 	}
-	return string(trimmed)
+	var value any
+	if json.Unmarshal(trimmed, &value) != nil {
+		return fmt.Sprintf("<non-JSON payload omitted: %d bytes>", len(trimmed))
+	}
+	redactPayloadValue(value)
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Sprintf("<payload summary error: %v>", err)
+	}
+	if len(encoded) > 16<<10 {
+		return fmt.Sprintf("<payload summary omitted: %d bytes>", len(encoded))
+	}
+	return string(encoded)
+}
+
+func redactPayloadValue(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			switch strings.ToLower(strings.TrimSpace(key)) {
+			case "model", "stream", "store", "service_tier", "type", "background", "generate", "n", "size", "quality", "output_format", "response_format", "moderation", "input_fidelity", "partial_images":
+				redactPayloadValue(child)
+			default:
+				typed[key] = "<redacted>"
+			}
+		}
+	case []any:
+		for index := range typed {
+			typed[index] = "<redacted>"
+		}
+	}
 }

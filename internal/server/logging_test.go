@@ -13,12 +13,17 @@ func TestFormatPayloadForLog(t *testing.T) {
 		{
 			name:  "JSON bytes",
 			value: []byte("{\n  \"hello\": \"world\"\n}\n"),
-			want:  "{\"hello\":\"world\"}",
+			want:  "{\"hello\":\"\\u003credacted\\u003e\"}",
 		},
 		{
 			name:  "map value",
 			value: map[string]any{"stream": true, "model": "gpt-5.6-terra"},
 			want:  "{\"model\":\"gpt-5.6-terra\",\"stream\":true}",
+		},
+		{
+			name:  "sensitive payload fields",
+			value: map[string]any{"model": "gpt-5.6-terra", "input": "private prompt"},
+			want:  "{\"input\":\"\\u003credacted\\u003e\",\"model\":\"gpt-5.6-terra\"}",
 		},
 	}
 
