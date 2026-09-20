@@ -118,6 +118,33 @@ func (s *Service) Get(id string) (Record, bool, error) {
 	return cloneRecord(record), true, nil
 }
 
+// ResolveReference finds an account by its local ID, upstream account ID,
+// label, or email. Labels and emails are matched case-insensitively. A
+// reference must identify exactly one account; ambiguous labels are rejected.
+func (s *Service) ResolveReference(reference string) (Record, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	reference = strings.TrimSpace(reference)
+	if reference == "" {
+		return Record{}, false, nil
+	}
+	var match *Record
+	for _, record := range s.records {
+		if record == nil || !(record.ID == reference || record.AccountID == reference ||
+			strings.EqualFold(record.Label, reference) || strings.EqualFold(record.Email, reference)) {
+			continue
+		}
+		if match != nil && match.ID != record.ID {
+			return Record{}, false, fmt.Errorf("account reference %q is ambiguous", reference)
+		}
+		match = record
+	}
+	if match == nil {
+		return Record{}, false, nil
+	}
+	return cloneRecord(match), true, nil
+}
+
 func (s *Service) EligibleNow(id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

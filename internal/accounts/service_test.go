@@ -797,3 +797,24 @@ func makeTestOAuthToken(t *testing.T, claims testJWTClaims) OAuthToken {
 		ExpiresAt: time.Now().UTC().Add(time.Hour),
 	}
 }
+
+func TestResolveReference(t *testing.T) {
+	now := time.Now().UTC()
+	store := &memoryStore{state: State{Records: []*Record{
+		{ID: "acct_personal", AccountID: "up_personal", Email: "me@example.com", Label: "Personal", Status: StatusActive, CreatedAt: now, UpdatedAt: now},
+		{ID: "acct_work", AccountID: "up_work", Email: "me@company.example", Label: "Business", Status: StatusActive, CreatedAt: now, UpdatedAt: now},
+	}}}
+	svc, err := NewService(store, RotationRoundRobin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, reference := range []string{"acct_personal", "up_personal", "personal", "me@example.com"} {
+		record, found, err := svc.ResolveReference(reference)
+		if err != nil || !found || record.ID != "acct_personal" {
+			t.Fatalf("ResolveReference(%q) = %+v, %v, %v", reference, record, found, err)
+		}
+	}
+	if _, found, err := svc.ResolveReference("missing"); err != nil || found {
+		t.Fatalf("missing reference = found %v, err %v", found, err)
+	}
+}

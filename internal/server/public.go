@@ -39,6 +39,7 @@ type sessionResolution struct {
 	ExplicitPrevious   bool
 	ImplicitResume     bool
 	ReplayAvailable    bool
+	AccountSelected    bool
 }
 
 var errIncompleteResponse = errors.New("upstream stream ended before a terminal response event")
@@ -174,6 +175,13 @@ func (a *App) resolveAndOpenRequest(c *gin.Context, endpoint string, normalized 
 		a.respondOpenAINormalizeError(c, err)
 		return openedRequest{}, false
 	}
+	// An explicit selector applies only to a new conversation. Continuations
+	// must stay on the account that created them, even if a client sends a
+	// conflicting selector.
+	if selectorErr := a.applyAccountSelector(c, &resolution); selectorErr != nil {
+		a.writeOpenAIError(c, http.StatusBadRequest, "unknown_account", selectorErr.Error(), "invalid_request_error")
+		return openedRequest{}, false
+	}
 
 	account, stream, quota, err := a.openStream(c, c.Request.Context(), endpoint, &resolution)
 	if err != nil && isInvalidReasoningSignatureError(err) {
@@ -182,6 +190,7 @@ func (a *App) resolveAndOpenRequest(c *gin.Context, endpoint string, normalized 
 				Request:            sanitized,
 				Original:           sanitized,
 				PreferredAccountID: account.ID,
+				AccountSelected:    resolution.AccountSelected,
 			}
 			account, stream, quota, err = a.openStream(c, c.Request.Context(), endpoint, &resolution)
 		}
@@ -449,6 +458,19 @@ func (a *App) acquireLeaseForResolution(ctx context.Context, resolution *session
 		}
 		if !a.modelCatalog().SupportsRecord(lease.Account, resolution.Request.Model) {
 			lease.Release()
+			return nil, errContinuationAccountUnavailable
+		}
+		return lease, nil
+	}
+	if resolution.AccountSelected {
+		if resolution.PreferredAccountID == "" {
+			return nil, errContinuationAccountUnavailable
+		}
+		lease, err := a.accountMgr.AcquireSpecificLease(ctx, resolution.PreferredAccountID, true)
+		if err != nil || !a.modelCatalog().SupportsRecord(lease.Account, resolution.Request.Model) {
+			if lease != nil {
+				lease.Release()
+			}
 			return nil, errContinuationAccountUnavailable
 		}
 		return lease, nil

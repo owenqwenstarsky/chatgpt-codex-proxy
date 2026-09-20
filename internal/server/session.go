@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
@@ -12,6 +13,26 @@ import (
 	"chatgpt-codex-proxy/internal/conversation"
 	"chatgpt-codex-proxy/internal/turn"
 )
+
+func (a *App) applyAccountSelector(c *gin.Context, resolution *sessionResolution) error {
+	if resolution == nil || resolution.ExplicitPrevious || resolution.ImplicitResume || strings.TrimSpace(resolution.PreferredAccountID) != "" {
+		return nil
+	}
+	reference := strings.TrimSpace(c.GetHeader("X-Proxy-Account"))
+	if reference == "" {
+		return nil
+	}
+	record, found, err := a.accounts.ResolveReference(reference)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("X-Proxy-Account does not identify a saved account")
+	}
+	resolution.PreferredAccountID = record.ID
+	resolution.AccountSelected = true
+	return nil
+}
 
 var (
 	errContinuationAccountUnavailable = errors.New("continuation account unavailable")
