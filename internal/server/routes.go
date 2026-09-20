@@ -38,6 +38,8 @@ func (a *App) routes() {
 	protected.POST("/v1/images/edits", a.handleImageEdits)
 	protected.POST("/v1/messages", a.handleAnthropicMessages)
 	protected.POST("/v1/messages/count_tokens", a.handleAnthropicCountTokens)
+	protected.Any("/noval/v1", a.handleNoValidation)
+	protected.Any("/noval/v1/*path", a.handleNoValidation)
 
 	adminGroup := protected.Group("/admin")
 	adminGroup.GET("/accounts", a.handleAdminAccounts)

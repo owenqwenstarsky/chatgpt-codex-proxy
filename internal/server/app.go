@@ -35,6 +35,7 @@ type App struct {
 	compactCaller     func(context.Context, accounts.Record, codex.CompactRequest) (codex.CompactResponse, *accounts.QuotaSnapshot, error)
 	imageOpener       func(*gin.Context, string, turn.NormalizedRequest) (openedRequest, bool)
 	directImageOpen   func(context.Context, accounts.Record, string, []byte, bool) (*http.Response, error)
+	noValidationOpen  func(context.Context, accounts.Record, string, string, http.Header, []byte) (*http.Response, error)
 	wsConnector       responsesWebSocketConnector
 	continuations     *conversation.ContinuationManager
 	claudeReplays     *anthropic.ReplayManager
