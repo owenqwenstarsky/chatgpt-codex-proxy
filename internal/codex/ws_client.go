@@ -18,6 +18,8 @@ type WSStream struct {
 	headers http.Header
 }
 
+const maxWebSocketMessageBytes = 64 << 20
+
 func ConnectWS(ctx context.Context, endpoint string, headers http.Header, body any) (*WSStream, error) {
 	dialer := websocket.Dialer{}
 	conn, resp, err := dialer.DialContext(ctx, endpoint, headers)
@@ -33,6 +35,7 @@ func ConnectWS(ctx context.Context, endpoint string, headers http.Header, body a
 		conn.Close()
 		return nil, err
 	}
+	conn.SetReadLimit(maxWebSocketMessageBytes)
 	return &WSStream{
 		conn:    conn,
 		headers: resp.Header.Clone(),

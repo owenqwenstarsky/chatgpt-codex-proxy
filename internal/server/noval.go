@@ -33,7 +33,7 @@ func (a *App) handleNoValidation(c *gin.Context) {
 		return
 	}
 
-	payload, err := io.ReadAll(c.Request.Body)
+	payload, err := readLimitedBody(c.Request.Body, maxRequestBodyBytes)
 	if err != nil {
 		a.writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", err.Error(), "invalid_request_error")
 		return
@@ -111,6 +111,7 @@ func (a *App) handleNoValidationWebSocket(c *gin.Context, account accounts.Recor
 		return
 	}
 	defer upstream.Close()
+	upstream.SetReadLimit(maxWebSocketMessageBytes)
 
 	responseHeaders := make(http.Header)
 	copyNoValidationResponseHeaders(responseHeaders, response.Header)
@@ -121,6 +122,7 @@ func (a *App) handleNoValidationWebSocket(c *gin.Context, account accounts.Recor
 		return
 	}
 	defer downstream.Close()
+	downstream.SetReadLimit(maxWebSocketMessageBytes)
 
 	a.observeQuotaSnapshot(account.ID, codex.ParseQuotaFromHeaders(response.Header))
 	a.accounts.NoteSuccess(account.ID)

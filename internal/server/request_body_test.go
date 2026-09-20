@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -11,6 +12,18 @@ import (
 
 	"chatgpt-codex-proxy/internal/models"
 )
+
+func TestReadLimitedBodyRejectsOversizedBody(t *testing.T) {
+	t.Parallel()
+
+	if _, err := readLimitedBody(strings.NewReader("12345"), 4); err == nil {
+		t.Fatal("readLimitedBody() error = nil, want size error")
+	}
+	body, err := readLimitedBody(strings.NewReader("1234"), 4)
+	if err != nil || string(body) != "1234" {
+		t.Fatalf("readLimitedBody() = %q, %v", body, err)
+	}
+}
 
 func TestHandleResponsesDecodesZstdRequestBody(t *testing.T) {
 	t.Parallel()

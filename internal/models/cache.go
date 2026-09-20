@@ -43,12 +43,35 @@ func SaveCache(dataDir string, snapshot CacheSnapshot) error {
 	payload = append(payload, '\n')
 
 	path := filepath.Join(dataDir, cacheFilename)
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, payload, 0o600); err != nil {
+	tmp, err := os.CreateTemp(dataDir, ".models-cache-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create tmp models cache: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod tmp models cache: %w", err)
+	}
+	if _, err := tmp.Write(payload); err != nil {
+		tmp.Close()
 		return fmt.Errorf("write tmp models cache: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync tmp models cache: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close tmp models cache: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("rename models cache: %w", err)
+	}
+	// Directory syncing is best-effort because some otherwise supported volume
+	// drivers reject fsync on directories. The file itself was synced above.
+	if dir, err := os.Open(dataDir); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
 	}
 	return nil
 }
