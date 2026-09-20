@@ -110,6 +110,14 @@ func (a *App) logCustomToolTrace(c *gin.Context, endpoint, phase string, eventTy
 	a.logger.Info("custom tool debug", attrs...)
 }
 
+func setGenerationSummary(c *gin.Context, accumulator *turn.Accumulator, terminal string) {
+	if accumulator == nil {
+		return
+	}
+	middleware.SetRequestResponseID(c, accumulator.ResponseID)
+	middleware.SetRequestSummary(c, accumulator.Model, terminal, accumulator.ResponsesUsageObject())
+}
+
 func contextLogAttrs(c *gin.Context, endpoint string) []any {
 	return []any{
 		"request_id", middleware.GetRequestID(c),

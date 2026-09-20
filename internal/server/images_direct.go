@@ -16,6 +16,7 @@ import (
 
 	"chatgpt-codex-proxy/internal/accounts"
 	"chatgpt-codex-proxy/internal/codex"
+	"chatgpt-codex-proxy/internal/generation"
 	"chatgpt-codex-proxy/internal/jsonutil"
 	"chatgpt-codex-proxy/internal/middleware"
 	"chatgpt-codex-proxy/internal/turn"
@@ -149,6 +150,7 @@ func (a *App) openDirectImageWithFailover(ctx context.Context, c *gin.Context, e
 		if err == nil {
 			a.setRequestAccount(c, account)
 			a.logUpstreamPayload(c, endpoint, "http", account.ID, json.RawMessage(payload))
+			attemptID := a.startGeneration(c, endpoint, "http", account, "", attemptCount, json.RawMessage(payload))
 			open := a.directImageOpen
 			if open == nil {
 				open = a.httpClient.OpenImage
@@ -159,6 +161,7 @@ func (a *App) openDirectImageWithFailover(ctx context.Context, c *gin.Context, e
 				response.Body = &releaseReadCloser{ReadCloser: response.Body, release: lease.Release}
 				return account, response, nil
 			}
+			a.finishGeneration(attemptID, generation.OutcomeFailed, 0, err, "")
 		}
 		lease.Release()
 		err = normalizeRequestContextError(ctx, err)
