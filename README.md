@@ -108,11 +108,12 @@ Exact rules: [docs/TRANSLATION.md](docs/TRANSLATION.md),
 
 ### No-validation passthrough
 
-`/noval/v1/*` is an opaque HTTP passthrough for clients such as Codex and Pi
+`/noval/v1/*` is an opaque HTTP and WebSocket passthrough for clients such as Codex and Pi
 that already produce the private Codex request shape. The suffix maps directly
 under the upstream `/codex` namespace: for example,
 `POST /noval/v1/responses` calls `POST /codex/responses`. The proxy does not
-parse or rewrite the body, and relays the upstream status and body as-is. It
+parse or rewrite HTTP bodies or WebSocket messages, and relays upstream status,
+bodies, and text or binary WebSocket messages as-is. It
 still requires `PROXY_API_KEY`, selects a ready account, replaces client auth
 with that account's upstream credentials, and removes hop-by-hop headers and
 cookies that would expose either side's session.
