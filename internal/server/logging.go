@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -187,13 +188,25 @@ func normalizePayloadString(payload []byte) string {
 	if json.Unmarshal(trimmed, &value) != nil {
 		return fmt.Sprintf("<non-JSON payload omitted: %d bytes>", len(trimmed))
 	}
-	redactPayloadValue(value)
+	switch value.(type) {
+	case map[string]any, []any:
+		redactPayloadValue(value)
+	default:
+		// Scalar payloads can contain arbitrary user content (for example, a
+		// JSON string). Never emit those values verbatim in debug logs.
+		value = "<redacted>"
+	}
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Sprintf("<payload summary error: %v>", err)
 	}
 	if len(encoded) > 16<<10 {
-		return fmt.Sprintf("<payload summary omitted: %d bytes>", len(encoded))
+		const suffix = "...<truncated>"
+		end := 16<<10 - len(suffix)
+		for end > 0 && !utf8.Valid(encoded[:end]) {
+			end--
+		}
+		return string(encoded[:end]) + suffix
 	}
 	return string(encoded)
 }
