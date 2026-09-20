@@ -17,6 +17,7 @@ import (
 	"chatgpt-codex-proxy/internal/accountmanager"
 	"chatgpt-codex-proxy/internal/accounts"
 	"chatgpt-codex-proxy/internal/codex"
+	"chatgpt-codex-proxy/internal/generation"
 	"chatgpt-codex-proxy/internal/jsonutil"
 	"chatgpt-codex-proxy/internal/middleware"
 	"chatgpt-codex-proxy/internal/models"
@@ -190,14 +191,22 @@ func (a *App) handleResponsesWebSocketTurn(c *gin.Context, conn *websocket.Conn,
 				}
 				headers := codex.BuildHeaders(account.Token.AccessToken, codex.HeaderOptions{AccountID: account.AccountID, Cookies: account.Cookies, TurnState: resolution.TurnState, RequestID: codex.NewRequestID(), IncludeBeta: true})
 				a.logUpstreamPayload(c, "responses_websocket", "websocket", account.ID, body)
+				attemptID := a.startGeneration(c, "responses_websocket", "websocket", account, resolution.Request.Model, attempts, body)
 				session.stream, err = a.connectResponsesWebSocket(c.Request.Context(), websocketEndpoint(a.cfg.CodexBaseURL), headers, body)
+				if err != nil {
+					a.finishGeneration(attemptID, generation.OutcomeFailed, 0, err, "")
+				}
 				if err == nil {
 					session.account = account
 					a.observeQuotaSnapshot(account.ID, codex.ParseQuotaFromHeaders(session.stream.Headers()))
 				}
 			} else {
 				a.logUpstreamPayload(c, "responses_websocket", "websocket", account.ID, body)
+				attemptID := a.startGeneration(c, "responses_websocket", "websocket", account, resolution.Request.Model, attempts, body)
 				err = session.stream.SendJSON(body)
+				if err != nil {
+					a.finishGeneration(attemptID, generation.OutcomeFailed, 0, err, "")
+				}
 			}
 			if err == nil {
 				var upstreamErr bool
@@ -305,6 +314,7 @@ func (a *App) handleResponsesWebSocketTurn(c *gin.Context, conn *websocket.Conn,
 		break
 	}
 
+	setGenerationSummary(c, accumulator, accumulator.NativeFinishReason())
 	a.finalizeSuccessfulStream(account.ID, accumulator, session.stream)
 	session.lastResponseID = accumulator.ResponseID
 	return true

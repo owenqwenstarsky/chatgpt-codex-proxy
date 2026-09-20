@@ -55,4 +55,7 @@ func (a *App) routes() {
 	adminGroup.GET("/requests/activity/stream", a.handleRequestActivityStream)
 	adminGroup.GET("/requests/logs/dates", a.handleRequestLogDates)
 	adminGroup.GET("/requests/logs", a.handleRequestLogs)
+	adminGroup.GET("/generations/logs/dates", a.handleGenerationLogDates)
+	adminGroup.GET("/generations/logs/:attempt_id", a.handleGenerationLogDetail)
+	adminGroup.GET("/generations/logs", a.handleGenerationLogs)
 }

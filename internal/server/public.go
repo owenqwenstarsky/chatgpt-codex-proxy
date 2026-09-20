@@ -17,6 +17,7 @@ import (
 	"chatgpt-codex-proxy/internal/accounts"
 	"chatgpt-codex-proxy/internal/codex"
 	"chatgpt-codex-proxy/internal/conversation"
+	"chatgpt-codex-proxy/internal/generation"
 	"chatgpt-codex-proxy/internal/jsonutil"
 	"chatgpt-codex-proxy/internal/middleware"
 	"chatgpt-codex-proxy/internal/models"
@@ -158,6 +159,7 @@ func (a *App) handlePublicRequest(
 		a.respondOpenAIUpstreamStreamError(c, endpoint, opened.Account.ID, "", err)
 		return
 	}
+	setGenerationSummary(c, accumulator, accumulator.NativeFinishReason())
 	response := buildResponse(accumulator)
 	if err := patchTuple(response, normalized.TupleSchema); err != nil {
 		a.logTupleReconversionWarning(c, endpoint, accumulator.ResponseID, err)
@@ -408,6 +410,7 @@ func (a *App) openHTTPStream(c *gin.Context, ctx context.Context, endpoint strin
 	middleware.SetActivityModel(c, resolution.Request.Model)
 	request := resolution.Request.Request
 	a.logUpstreamPayload(c, endpoint, "http", account.ID, codex.StreamRequestPayload(request))
+	attemptID := a.startGeneration(c, endpoint, "http", account, resolution.Request.Model, len(attempted)+1, codex.StreamRequestPayload(request))
 	var stream eventStream
 	if a.httpStream != nil {
 		stream, err = a.httpStream(ctx, account, request, resolution.TurnState)
@@ -415,6 +418,7 @@ func (a *App) openHTTPStream(c *gin.Context, ctx context.Context, endpoint strin
 		stream, err = a.httpClient.StreamResponse(ctx, account, request, resolution.TurnState)
 	}
 	if err != nil {
+		a.finishGeneration(attemptID, generation.OutcomeFailed, 0, err, "")
 		lease.Release()
 		return account, nil, nil, err
 	}
@@ -438,9 +442,11 @@ func (a *App) openWSStream(c *gin.Context, ctx context.Context, endpoint string,
 	})
 	body := resolution.Request.ToCodexWSCreatePayload()
 	a.logUpstreamPayload(c, endpoint, "websocket", account.ID, body)
+	attemptID := a.startGeneration(c, endpoint, "websocket", account, resolution.Request.Model, len(attempted)+1, body)
 	wsEndpoint := websocketEndpoint(a.cfg.CodexBaseURL)
 	stream, err := a.connectResponsesWebSocket(ctx, wsEndpoint, headers, body)
 	if err != nil {
+		a.finishGeneration(attemptID, generation.OutcomeFailed, 0, err, "")
 		lease.Release()
 		return account, nil, nil, err
 	}
@@ -646,6 +652,7 @@ func (a *App) streamChatCompletion(c *gin.Context, account accounts.Record, norm
 		}
 	}
 
+	setGenerationSummary(c, accumulator, accumulator.NativeFinishReason())
 	a.finalizeSuccessfulStream(account.ID, accumulator, stream)
 	middleware.MarkActivityFinalizing(c)
 

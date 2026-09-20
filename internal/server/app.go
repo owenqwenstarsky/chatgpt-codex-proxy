@@ -18,6 +18,7 @@ import (
 	"chatgpt-codex-proxy/internal/config"
 	"chatgpt-codex-proxy/internal/conversation"
 	"chatgpt-codex-proxy/internal/devicelogin"
+	"chatgpt-codex-proxy/internal/generation"
 	"chatgpt-codex-proxy/internal/middleware"
 	"chatgpt-codex-proxy/internal/models"
 	"chatgpt-codex-proxy/internal/turn"
@@ -41,6 +42,7 @@ type App struct {
 	claudeReplays     *anthropic.ReplayManager
 	models            *models.Catalog
 	activity          *activity.Store
+	generations       *generation.Store
 	activityHeartbeat time.Duration
 	cancel            context.CancelFunc
 }
@@ -72,6 +74,10 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 	if err := activityStore.PruneLogs(); err != nil {
 		logger.Warn("prune request activity logs failed", "error", err.Error())
 	}
+	generationStore := generation.NewStore(cfg.DataDir)
+	if err := generationStore.Prune(); err != nil {
+		logger.Warn("prune generation logs failed", "error", err.Error())
+	}
 	engine.Use(middleware.RequestID())
 	engine.Use(middleware.RequestActivity(activityStore, logger))
 	engine.Use(middleware.RequestLogger(logger))
@@ -89,7 +95,9 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 		claudeReplays: anthropic.NewReplayManager(cfg.ContinuationTTL),
 		models:        modelCatalog,
 		activity:      activityStore,
+		generations:   generationStore,
 	}
+	engine.Use(func(c *gin.Context) { c.Next(); app.finishGenerations(c) })
 	app.routes()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -138,6 +146,9 @@ func (a *App) housekeeping(ctx context.Context) {
 			return
 		case <-sweeps:
 			a.activity.Sweep()
+			if err := a.generations.Prune(); err != nil {
+				a.logger.Warn("prune generation logs failed", "error", err.Error())
+			}
 			if err := a.activity.PruneLogs(); err != nil {
 				a.logger.Warn("prune request activity logs failed", "error", err.Error())
 			}

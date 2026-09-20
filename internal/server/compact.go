@@ -13,6 +13,7 @@ import (
 	"chatgpt-codex-proxy/internal/accountmanager"
 	"chatgpt-codex-proxy/internal/accounts"
 	"chatgpt-codex-proxy/internal/codex"
+	"chatgpt-codex-proxy/internal/generation"
 	"chatgpt-codex-proxy/internal/jsonutil"
 	"chatgpt-codex-proxy/internal/middleware"
 	"chatgpt-codex-proxy/internal/models"
@@ -66,6 +67,8 @@ func (a *App) handleResponsesCompact(c *gin.Context) {
 	a.accounts.NoteSuccess(account.ID)
 
 	response := compactResponseObject(upstream)
+	middleware.SetRequestResponseID(c, upstream.ID)
+	middleware.SetRequestSummary(c, "", "response.completed", upstream.Usage)
 	if err := openai.PatchResponsesObjectForTuple(response, normalized.TupleSchema); err != nil {
 		a.logTupleReconversionWarning(c, "responses_compact", jsonutil.StringValue(response["id"]), err)
 	}
@@ -108,6 +111,7 @@ func (a *App) callCompactWithRecovery(c *gin.Context, ctx context.Context, prefe
 		middleware.SetActivityModel(c, normalized.Model)
 		payload := normalized.CompactRequest
 		a.logUpstreamPayload(c, "responses_compact", "http", account.ID, payload)
+		attemptID := a.startGeneration(c, "responses_compact", "http", account, normalized.Model, attemptCount, payload)
 		caller := a.compactCaller
 		if caller == nil {
 			caller = a.httpClient.CompactResponse
@@ -118,6 +122,7 @@ func (a *App) callCompactWithRecovery(c *gin.Context, ctx context.Context, prefe
 		if err == nil {
 			return account, upstream, quota, nil
 		}
+		a.finishGeneration(attemptID, generation.OutcomeFailed, 0, err, "")
 		if !isRateLimitCapacityFailure(err) {
 			return account, codex.CompactResponse{}, nil, err
 		}

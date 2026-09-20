@@ -94,6 +94,7 @@ func (a *App) streamCompletion(c *gin.Context, account accounts.Record, normaliz
 		}
 	}
 
+	setGenerationSummary(c, accumulator, accumulator.NativeFinishReason())
 	a.finalizeSuccessfulStream(account.ID, accumulator, stream)
 	middleware.MarkActivityFinalizing(c)
 	finalText := ""

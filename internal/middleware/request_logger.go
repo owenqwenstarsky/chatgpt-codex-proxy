@@ -9,10 +9,13 @@ import (
 )
 
 const (
-	RequestOutcomeKey      = "request_outcome"
-	RequestErrorCodeKey    = "request_error_code"
-	RequestErrorMessageKey = "request_error_message"
-	RequestResponseIDKey   = "request_response_id"
+	RequestOutcomeKey       = "request_outcome"
+	RequestErrorCodeKey     = "request_error_code"
+	RequestErrorMessageKey  = "request_error_message"
+	RequestResponseIDKey    = "request_response_id"
+	RequestResponseModelKey = "request_response_model"
+	RequestUsageKey         = "request_usage"
+	RequestTerminalEventKey = "request_terminal_event"
 )
 
 const maxLoggedErrorLength = 2048
@@ -28,6 +31,14 @@ func SetRequestError(c *gin.Context, code, message string) {
 
 func SetRequestResponseID(c *gin.Context, responseID string) {
 	c.Set(RequestResponseIDKey, strings.TrimSpace(responseID))
+}
+
+func SetRequestSummary(c *gin.Context, model, terminal string, usage map[string]any) {
+	c.Set(RequestResponseModelKey, strings.TrimSpace(model))
+	c.Set(RequestTerminalEventKey, strings.TrimSpace(terminal))
+	if usage != nil {
+		c.Set(RequestUsageKey, usage)
+	}
 }
 
 func RequestLogger(logger *slog.Logger) gin.HandlerFunc {

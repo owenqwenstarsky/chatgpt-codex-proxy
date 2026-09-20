@@ -176,6 +176,17 @@ GET /admin/requests/activity
 GET /admin/requests/activity/stream
 GET /admin/requests/logs/dates
 GET /admin/requests/logs?date=YYYY-MM-DD
+
+Upstream generation attempts (including account failover attempts) are retained
+separately with sanitized request payloads and terminal summaries:
+
+```
+GET /admin/generations/logs/dates
+GET /admin/generations/logs?date=YYYY-MM-DD
+GET /admin/generations/logs/:attempt_id
+```
+
+Generation logs use the same 30 UTC-day retention as request activity logs.
 ```
 
 The stream starts with a named `snapshot` event, then sends named `upsert` and

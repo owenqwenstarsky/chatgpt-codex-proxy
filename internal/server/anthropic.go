@@ -183,6 +183,7 @@ func (a *App) streamAnthropicMessage(c *gin.Context, account accounts.Record, no
 	// Every error path returns from the loop; reaching here requires a completed
 	// or incomplete terminal response whose executable tool calls are finalized.
 	a.claudeReplays.Remember(replayScope, replayModel, account.ID, accumulator)
+	setGenerationSummary(c, accumulator, accumulator.NativeFinishReason())
 	a.finalizeSuccessfulStream(account.ID, accumulator, stream)
 	c.Writer.Flush()
 }
