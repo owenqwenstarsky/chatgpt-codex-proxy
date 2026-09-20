@@ -72,6 +72,10 @@ func (a *App) handleAnthropicMessages(c *gin.Context) {
 		Original:           normalized,
 		PreferredAccountID: replay.AccountID,
 	}
+	if selectorErr := a.applyAccountSelector(c, &resolution); selectorErr != nil {
+		a.writeAnthropicError(c, http.StatusBadRequest, selectorErr.Error())
+		return
+	}
 	account, stream, quota, err := a.openStream(c, c.Request.Context(), "anthropic_messages", &resolution)
 	if err != nil && isInvalidReasoningSignatureError(err) {
 		sanitized, changed := anthropic.WithoutThinking(request)

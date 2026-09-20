@@ -157,6 +157,13 @@ account and wait for that account instead of migrating.
 A failed OAuth refresh only expires an account on `invalid_grant`. Anything else
 keeps it active behind a 60-second cooldown.
 
+To keep personal and business traffic separate, send `X-Proxy-Account` on a
+new conversation. It accepts the saved local account ID, upstream account ID,
+label, or email (labels and emails are case-insensitive). The selected account
+is required to serve that request; the proxy will not silently rotate to a
+different account. `previous_response_id` continuations always remain pinned
+to the account that created them, even if a conflicting selector is supplied.
+
 Details: [docs/MULTI_ACCOUNT_ROTATION_STRATEGY.md](docs/MULTI_ACCOUNT_ROTATION_STRATEGY.md).
 
 ## Activity and Logbook
