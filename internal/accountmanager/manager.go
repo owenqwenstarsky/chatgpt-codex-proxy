@@ -69,7 +69,13 @@ func (m *AccountManager) AcquireReadyForModelLease(ctx context.Context, preferre
 // available capacity. If all matching accounts are full, normal rotation picks
 // the account whose FIFO queue receives the request.
 func (m *AccountManager) AcquireMatchingLease(ctx context.Context, preferredID string, allow func(accounts.Record) bool) (*Lease, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		record, err := m.accounts.AcquireMatching(preferredID, func(candidate accounts.Record) bool {
 			return (allow == nil || allow(candidate)) && m.capacity.HasCapacity(candidate.ID)
 		})
