@@ -121,16 +121,20 @@ func (a *App) openDirectImageWithFailover(ctx context.Context, c *gin.Context, e
 	attempted := make(map[string]struct{})
 	var lastAccount accounts.Record
 	var lastErr error
-	started := time.Now().UTC()
+	var started time.Time
 	attemptCount := 0
 	for {
 		attemptCount++
-		account, err := a.accounts.AcquireMatching("", func(record accounts.Record) bool {
+		lease, err := a.accountMgr.AcquireMatchingLease(ctx, "", func(record accounts.Record) bool {
 			_, alreadyAttempted := attempted[record.ID]
 			return !alreadyAttempted
 		})
+		account := accounts.Record{}
+		if lease != nil {
+			account = lease.Account
+		}
 		if err != nil {
-			if retry, recoveryErr := a.waitForCapacityRecovery(ctx, endpoint, started, attemptCount, nil); recoveryErr != nil {
+			if retry, recoveryErr := a.waitForCapacityRecovery(ctx, endpoint, rateLimitRecoveryStart(&started), attemptCount, nil); recoveryErr != nil {
 				return lastAccount, nil, recoveryErr
 			} else if retry {
 				clear(attempted)
@@ -141,12 +145,7 @@ func (a *App) openDirectImageWithFailover(ctx context.Context, c *gin.Context, e
 			}
 			return account, nil, err
 		}
-		selected := account
-		a.setRequestAccount(c, selected)
-		account, err = a.accountMgr.EnsureReady(ctx, selected.ID)
-		if err != nil {
-			account = selected
-		}
+		a.setRequestAccount(c, account)
 		if err == nil {
 			a.setRequestAccount(c, account)
 			a.logUpstreamPayload(c, endpoint, "http", account.ID, json.RawMessage(payload))
@@ -157,9 +156,11 @@ func (a *App) openDirectImageWithFailover(ctx context.Context, c *gin.Context, e
 			var response *http.Response
 			response, err = open(ctx, account, path, payload, stream)
 			if err == nil {
+				response.Body = &releaseReadCloser{ReadCloser: response.Body, release: lease.Release}
 				return account, response, nil
 			}
 		}
+		lease.Release()
 		err = normalizeRequestContextError(ctx, err)
 		if directImageEndpointUnavailable(err) || !shouldFailoverRequest(err) {
 			return account, nil, err

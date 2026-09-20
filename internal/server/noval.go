@@ -23,13 +23,14 @@ func (a *App) handleNoValidation(c *gin.Context) {
 		return
 	}
 	if websocket.IsWebSocketUpgrade(c.Request) {
-		account, err := a.accountMgr.AcquireReady(c.Request.Context(), "")
+		lease, err := a.accountMgr.AcquireReadyLease(c.Request.Context(), "")
 		if err != nil {
 			a.handleOpenStreamError(c, "noval", "", "", err)
 			return
 		}
+		account := lease.Account
 		a.setRequestAccount(c, account)
-		a.handleNoValidationWebSocket(c, account, target)
+		a.handleNoValidationWebSocket(c, account, target, lease.Release)
 		return
 	}
 
@@ -38,11 +39,12 @@ func (a *App) handleNoValidation(c *gin.Context) {
 		a.writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", err.Error(), "invalid_request_error")
 		return
 	}
-	account, err := a.accountMgr.AcquireReady(c.Request.Context(), "")
+	lease, err := a.accountMgr.AcquireReadyLease(c.Request.Context(), "")
 	if err != nil {
 		a.handleOpenStreamError(c, "noval", "", "", err)
 		return
 	}
+	account := lease.Account
 	a.setRequestAccount(c, account)
 
 	open := a.noValidationOpen
@@ -51,9 +53,11 @@ func (a *App) handleNoValidation(c *gin.Context) {
 	}
 	response, err := open(c.Request.Context(), account, c.Request.Method, target, c.Request.Header, payload)
 	if err != nil {
+		lease.Release()
 		a.handleOpenStreamError(c, "noval", account.ID, account.ID, err)
 		return
 	}
+	response.Body = &releaseReadCloser{ReadCloser: response.Body, release: lease.Release}
 	a.relayNoValidationResponse(c, account.ID, response)
 }
 
@@ -90,9 +94,10 @@ func (a *App) relayNoValidationResponse(c *gin.Context, accountID string, respon
 	}
 }
 
-func (a *App) handleNoValidationWebSocket(c *gin.Context, account accounts.Record, target string) {
+func (a *App) handleNoValidationWebSocket(c *gin.Context, account accounts.Record, target string, release func()) {
 	endpoint, err := noValidationWebSocketEndpoint(a.cfg.CodexBaseURL, target)
 	if err != nil {
+		release()
 		a.handleOpenStreamError(c, "noval", account.ID, account.ID, err)
 		return
 	}
@@ -104,9 +109,11 @@ func (a *App) handleNoValidationWebSocket(c *gin.Context, account accounts.Recor
 	upstream, response, err := websocket.DefaultDialer.DialContext(c.Request.Context(), endpoint, headers)
 	if err != nil {
 		if response != nil {
+			response.Body = &releaseReadCloser{ReadCloser: response.Body, release: release}
 			a.relayNoValidationResponse(c, account.ID, response)
 			return
 		}
+		release()
 		a.handleOpenStreamError(c, "noval", account.ID, account.ID, err)
 		return
 	}
@@ -119,6 +126,7 @@ func (a *App) handleNoValidationWebSocket(c *gin.Context, account accounts.Recor
 	responseHeaders.Del("Sec-WebSocket-Extensions")
 	downstream, err := responsesWebSocketUpgrader.Upgrade(c.Writer, c.Request, responseHeaders)
 	if err != nil {
+		release()
 		return
 	}
 	defer downstream.Close()
@@ -137,6 +145,7 @@ func (a *App) handleNoValidationWebSocket(c *gin.Context, account accounts.Recor
 	// Closing both sides unblocks the other relay goroutine immediately.
 	_ = downstream.Close()
 	_ = upstream.Close()
+	release()
 	middleware.MarkActivityFinalizing(c)
 }
 

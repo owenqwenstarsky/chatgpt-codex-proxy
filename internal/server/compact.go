@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"chatgpt-codex-proxy/internal/accountmanager"
 	"chatgpt-codex-proxy/internal/accounts"
 	"chatgpt-codex-proxy/internal/codex"
 	"chatgpt-codex-proxy/internal/jsonutil"
@@ -76,11 +77,15 @@ func (a *App) callCompactWithRecovery(c *gin.Context, ctx context.Context, prefe
 	attempted := make(map[string]struct{})
 	var lastAccount accounts.Record
 	var lastErr error
-	started := time.Now().UTC()
+	var started time.Time
 	attemptCount := 0
 	for {
 		attemptCount++
-		account, err := a.acquireAccountForCompactExcluding(ctx, preferredAccountID, normalized, attempted)
+		lease, err := a.acquireAccountLeaseForCompactExcluding(ctx, preferredAccountID, normalized, attempted)
+		account := accounts.Record{}
+		if lease != nil {
+			account = lease.Account
+		}
 		a.setRequestAccount(c, account)
 		if err != nil {
 			allow := func(record accounts.Record) bool {
@@ -89,7 +94,7 @@ func (a *App) callCompactWithRecovery(c *gin.Context, ctx context.Context, prefe
 				}
 				return strings.TrimSpace(normalized.Model) == "" || a.modelCatalog().SupportsRecord(record, normalized.Model)
 			}
-			if retry, recoveryErr := a.waitForCapacityRecovery(ctx, "responses_compact", started, attemptCount, allow); recoveryErr != nil {
+			if retry, recoveryErr := a.waitForCapacityRecovery(ctx, "responses_compact", rateLimitRecoveryStart(&started), attemptCount, allow); recoveryErr != nil {
 				return lastAccount, codex.CompactResponse{}, nil, recoveryErr
 			} else if retry {
 				clear(attempted)
@@ -108,6 +113,7 @@ func (a *App) callCompactWithRecovery(c *gin.Context, ctx context.Context, prefe
 			caller = a.httpClient.CompactResponse
 		}
 		upstream, quota, err := caller(ctx, account, payload)
+		lease.Release()
 		err = normalizeRequestContextError(ctx, err)
 		if err == nil {
 			return account, upstream, quota, nil
@@ -151,45 +157,26 @@ func (a *App) resolveCompactRequest(normalized turn.NormalizedCompactRequest) (t
 	return normalized, strings.TrimSpace(record.AccountID), nil
 }
 
-func (a *App) acquireAccountForCompact(ctx context.Context, preferredAccountID string, normalized *turn.NormalizedCompactRequest) (accounts.Record, error) {
-	if !normalized.ModelExplicit && strings.TrimSpace(normalized.Model) == "" {
-		account, err := a.accountMgr.AcquireReady(ctx, preferredAccountID)
-		if err != nil {
-			return accounts.Record{}, err
-		}
-		modelID := a.modelCatalog().ResolveDefaultForRecord(account, a.cfg.DefaultModel)
-		if strings.TrimSpace(modelID) == "" {
-			return accounts.Record{}, errContinuationAccountUnavailable
-		}
-		normalized.Model = modelID
-		return account, nil
-	}
-	return a.accountMgr.AcquireReadyForModel(ctx, preferredAccountID, normalized.Model)
-}
-
-func (a *App) acquireAccountForCompactExcluding(ctx context.Context, preferredAccountID string, normalized *turn.NormalizedCompactRequest, attempted map[string]struct{}) (accounts.Record, error) {
+func (a *App) acquireAccountLeaseForCompactExcluding(ctx context.Context, preferredAccountID string, normalized *turn.NormalizedCompactRequest, attempted map[string]struct{}) (*accountmanager.Lease, error) {
 	allow := func(record accounts.Record) bool {
 		if _, tried := attempted[record.ID]; tried {
 			return false
 		}
 		return strings.TrimSpace(normalized.Model) == "" || a.modelCatalog().SupportsRecord(record, normalized.Model)
 	}
-	record, err := a.accounts.AcquireMatching(preferredAccountID, allow)
+	lease, err := a.accountMgr.AcquireMatchingLease(ctx, preferredAccountID, allow)
 	if err != nil {
-		return accounts.Record{}, err
-	}
-	ready, err := a.accountMgr.EnsureReady(ctx, record.ID)
-	if err != nil {
-		return record, err
+		return nil, err
 	}
 	if !normalized.ModelExplicit && strings.TrimSpace(normalized.Model) == "" {
-		modelID := a.modelCatalog().ResolveDefaultForRecord(ready, a.cfg.DefaultModel)
+		modelID := a.modelCatalog().ResolveDefaultForRecord(lease.Account, a.cfg.DefaultModel)
 		if strings.TrimSpace(modelID) == "" {
-			return accounts.Record{}, errContinuationAccountUnavailable
+			lease.Release()
+			return nil, errContinuationAccountUnavailable
 		}
 		normalized.Model = modelID
 	}
-	return ready, nil
+	return lease, nil
 }
 
 func compactResponseObject(upstream codex.CompactResponse) map[string]any {

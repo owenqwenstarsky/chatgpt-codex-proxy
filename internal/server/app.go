@@ -111,6 +111,9 @@ func (a *App) Close() {
 	if a.deviceLogins != nil {
 		a.deviceLogins.Close()
 	}
+	if a.accountMgr != nil {
+		a.accountMgr.Close()
+	}
 	if a.activity != nil {
 		a.activity.Close()
 	}

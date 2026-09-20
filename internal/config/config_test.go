@@ -71,11 +71,33 @@ func TestLoadBuildsListenAddrAndDataDir(t *testing.T) {
 			if cfg.RateLimitMaxWait != 2*time.Minute {
 				t.Fatalf("Load() rate limit max wait = %s, want 2m", cfg.RateLimitMaxWait)
 			}
+			if cfg.MaxActiveRequestsPerAccount != 2 {
+				t.Fatalf("Load() max active requests = %d, want 2", cfg.MaxActiveRequestsPerAccount)
+			}
 			wantDataDir := filepath.Join(cwd, tc.wantData)
 			if cfg.DataDir != wantDataDir {
 				t.Fatalf("Load() data dir = %q, want %q", cfg.DataDir, wantDataDir)
 			}
 		})
+	}
+}
+
+func TestLoadParsesAndValidatesMaxActiveRequestsPerAccount(t *testing.T) {
+	t.Setenv("PROXY_API_KEY", "test-key")
+	t.Setenv("MAX_ACTIVE_REQUESTS_PER_ACCOUNT", "4")
+	t.Chdir(t.TempDir())
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxActiveRequestsPerAccount != 4 {
+		t.Fatalf("limit = %d, want 4", cfg.MaxActiveRequestsPerAccount)
+	}
+	for _, value := range []string{"0", "-1", "nope"} {
+		t.Setenv("MAX_ACTIVE_REQUESTS_PER_ACCOUNT", value)
+		if _, err := Load(); err == nil {
+			t.Fatalf("value %q accepted", value)
+		}
 	}
 }
 

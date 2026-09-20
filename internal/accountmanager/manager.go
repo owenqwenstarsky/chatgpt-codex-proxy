@@ -21,7 +21,19 @@ type AccountManager struct {
 	http     *codex.HTTPClient
 	models   func(accounts.Record, string) bool
 
-	locks sync.Map
+	locks    sync.Map
+	capacity *CapacityCoordinator
+}
+
+type Lease struct {
+	Account accounts.Record
+	release func()
+}
+
+func (l *Lease) Release() {
+	if l != nil && l.release != nil {
+		l.release()
+	}
 }
 
 // ErrAccountNotFound indicates that the requested local account does not exist.
@@ -34,31 +46,110 @@ func NewAccountManager(cfg config.Config, accountsSvc *accounts.Service, oauth *
 		oauth:    oauth,
 		http:     httpClient,
 		models:   modelSupport,
+		capacity: NewCapacityCoordinator(cfg.MaxActiveRequestsPerAccount),
 	}
 }
 
-func (m *AccountManager) AcquireReady(ctx context.Context, preferredID string) (accounts.Record, error) {
-	record, err := m.accounts.Acquire(preferredID)
-	if err != nil {
-		return accounts.Record{}, err
-	}
-	return m.EnsureReady(ctx, record.ID)
+func (m *AccountManager) Close() { m.capacity.Close() }
+
+func (m *AccountManager) Capacity(id string) CapacitySnapshot { return m.capacity.Snapshot(id) }
+func (m *AccountManager) HasCapacity(id string) bool          { return m.capacity.HasCapacity(id) }
+
+func (m *AccountManager) AcquireReadyLease(ctx context.Context, preferredID string) (*Lease, error) {
+	return m.AcquireMatchingLease(ctx, preferredID, nil)
 }
 
-func (m *AccountManager) AcquireReadyForModel(ctx context.Context, preferredID, modelID string) (accounts.Record, error) {
-	record, err := m.accounts.AcquireMatching(preferredID, func(record accounts.Record) bool {
-		if m.models == nil {
-			return true
-		}
-		return m.models(record, modelID)
+func (m *AccountManager) AcquireReadyForModelLease(ctx context.Context, preferredID, modelID string) (*Lease, error) {
+	return m.AcquireMatchingLease(ctx, preferredID, func(record accounts.Record) bool {
+		return m.models == nil || m.models(record, modelID)
 	})
-	if err != nil {
-		return accounts.Record{}, err
-	}
-	return m.EnsureReady(ctx, record.ID)
 }
 
-func (m *AccountManager) EnsureReady(ctx context.Context, id string) (accounts.Record, error) {
+// AcquireMatchingLease prefers an eligible matching account with immediately
+// available capacity. If all matching accounts are full, normal rotation picks
+// the account whose FIFO queue receives the request.
+func (m *AccountManager) AcquireMatchingLease(ctx context.Context, preferredID string, allow func(accounts.Record) bool) (*Lease, error) {
+	for {
+		record, err := m.accounts.AcquireMatching(preferredID, func(candidate accounts.Record) bool {
+			return (allow == nil || allow(candidate)) && m.capacity.HasCapacity(candidate.ID)
+		})
+		if err == nil {
+			release, acquired := m.capacity.TryAcquire(record.ID)
+			if !acquired {
+				continue
+			}
+			ready, readyErr := m.ensureReady(ctx, record.ID)
+			if readyErr != nil {
+				release()
+				return nil, readyErr
+			}
+			return &Lease{Account: ready, release: release}, nil
+		}
+
+		// Distinguish "all matching accounts are full" from no eligible
+		// capacity. The latter must retain the existing no-active-account error.
+		record, err = m.accounts.AcquireMatching(preferredID, allow)
+		if err != nil {
+			return nil, err
+		}
+		release, err := m.capacity.Acquire(ctx, record.ID)
+		if err != nil {
+			return nil, err
+		}
+		eligible, eligibleErr := m.accounts.EligibleNow(record.ID)
+		if eligibleErr != nil {
+			release()
+			return nil, eligibleErr
+		}
+		updated, ok, getErr := m.accounts.Get(record.ID)
+		if getErr != nil {
+			release()
+			return nil, getErr
+		}
+		if !ok || !eligible || (allow != nil && !allow(updated)) {
+			release()
+			continue
+		}
+		ready, readyErr := m.ensureReady(ctx, record.ID)
+		if readyErr != nil {
+			release()
+			return nil, readyErr
+		}
+		return &Lease{Account: ready, release: release}, nil
+	}
+}
+
+// AcquireSpecificLease waits for one required account. When requireEligible is
+// false it preserves continuation behavior, where cooldown alone cannot move a
+// stateful request to another account.
+func (m *AccountManager) AcquireSpecificLease(ctx context.Context, id string, requireEligible bool) (*Lease, error) {
+	if _, err := m.getRecord(id); err != nil {
+		return nil, err
+	}
+	release, err := m.capacity.Acquire(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if requireEligible {
+		eligible, eligibleErr := m.accounts.EligibleNow(id)
+		if eligibleErr != nil {
+			release()
+			return nil, eligibleErr
+		}
+		if !eligible {
+			release()
+			return nil, fmt.Errorf("account unavailable")
+		}
+	}
+	ready, err := m.ensureReady(ctx, id)
+	if err != nil {
+		release()
+		return nil, err
+	}
+	return &Lease{Account: ready, release: release}, nil
+}
+
+func (m *AccountManager) ensureReady(ctx context.Context, id string) (accounts.Record, error) {
 	record, err := m.getRecord(id)
 	if err != nil {
 		return accounts.Record{}, err
@@ -88,7 +179,18 @@ func (m *AccountManager) EnsureReady(ctx context.Context, id string) (accounts.R
 	return m.refreshLocked(ctx, record)
 }
 
+// EnsureReady is retained for non-upstream callers that only need token
+// validation. Upstream operations should acquire a lease first.
+func (m *AccountManager) EnsureReady(ctx context.Context, id string) (accounts.Record, error) {
+	return m.ensureReady(ctx, id)
+}
+
 func (m *AccountManager) Refresh(ctx context.Context, id string) (accounts.Record, error) {
+	release, err := m.capacity.Acquire(ctx, id)
+	if err != nil {
+		return accounts.Record{}, err
+	}
+	defer release()
 	lock := m.lockFor(id)
 	lock.Lock()
 	defer lock.Unlock()
@@ -112,10 +214,12 @@ func (m *AccountManager) GetUsage(ctx context.Context, id string, cached bool) (
 		return record, record.CachedQuota, nil
 	}
 
-	record, err := m.EnsureReady(ctx, id)
+	lease, err := m.AcquireSpecificLease(ctx, id, true)
 	if err != nil {
 		return accounts.Record{}, nil, err
 	}
+	defer lease.Release()
+	record := lease.Account
 
 	_, quota, err := m.http.GetUsage(ctx, record)
 	if err != nil {

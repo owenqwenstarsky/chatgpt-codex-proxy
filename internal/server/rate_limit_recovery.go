@@ -15,6 +15,13 @@ type rateLimitRecoveryError struct {
 	RetryAt time.Time
 }
 
+func rateLimitRecoveryStart(started *time.Time) time.Time {
+	if started.IsZero() {
+		*started = time.Now().UTC()
+	}
+	return *started
+}
+
 func (e *rateLimitRecoveryError) Error() string {
 	return "rate limited capacity did not recover before the wait budget expired"
 }

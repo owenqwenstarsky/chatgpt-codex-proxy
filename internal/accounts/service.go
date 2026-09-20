@@ -472,6 +472,44 @@ func (s *Service) AcquireThread(key, preferredID string, allow func(Record) bool
 	return s.acquireMatchingLocked(preferredID, allow, now)
 }
 
+// ThreadAffinity returns a currently eligible binding without falling back to
+// normal rotation. Capacity-aware callers use this to preserve an established
+// sticky-thread account while allowing new threads to prefer free capacity.
+func (s *Service) ThreadAffinity(key string, allow func(Record) bool) (Record, bool, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return Record{}, false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	if err := s.refreshAllLocked(now); err != nil {
+		return Record{}, false, err
+	}
+	binding, ok := s.threadAffinities[key]
+	if !ok {
+		return Record{}, false, nil
+	}
+	if !binding.ExpiresAt.After(now) {
+		delete(s.threadAffinities, key)
+		return Record{}, false, nil
+	}
+	record, exists := s.records[binding.AccountID]
+	if !exists || !isEligible(record, now) {
+		if exists && quotaBlocksGeneralRouting(record.CachedQuota, now) {
+			delete(s.threadAffinities, key)
+		}
+		return Record{}, false, nil
+	}
+	candidate := cloneRecord(record)
+	if allow != nil && !allow(candidate) {
+		return Record{}, false, nil
+	}
+	binding.ExpiresAt = now.Add(s.threadAffinityTTL)
+	s.threadAffinities[key] = binding
+	return candidate, true, nil
+}
+
 func (s *Service) Acquire(preferredID string) (Record, error) {
 	return s.AcquireMatching(preferredID, nil)
 }

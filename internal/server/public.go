@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"chatgpt-codex-proxy/internal/accountmanager"
 	"chatgpt-codex-proxy/internal/accounts"
 	"chatgpt-codex-proxy/internal/codex"
 	"chatgpt-codex-proxy/internal/conversation"
@@ -53,6 +54,34 @@ type openedRequest struct {
 type bufferedEventStream struct {
 	events []*codex.StreamEvent
 	eventStream
+}
+
+type leasedEventStream struct {
+	eventStream
+	release func()
+}
+
+type releaseReadCloser struct {
+	io.ReadCloser
+	release func()
+}
+
+func (r *releaseReadCloser) Close() error {
+	err := r.ReadCloser.Close()
+	if r.release != nil {
+		r.release()
+		r.release = nil
+	}
+	return err
+}
+
+func (s *leasedEventStream) Close() error {
+	err := s.eventStream.Close()
+	if s.release != nil {
+		s.release()
+		s.release = nil
+	}
+	return err
 }
 
 func (s *bufferedEventStream) NextEvent() (*codex.StreamEvent, error) {
@@ -215,7 +244,7 @@ func (a *App) openStreamWithFailover(c *gin.Context, ctx context.Context, endpoi
 	attempted := make(map[string]struct{})
 	var lastAccount accounts.Record
 	var lastErr error
-	started := time.Now().UTC()
+	var started time.Time
 	attemptCount := 0
 	for {
 		account, stream, quota, err := open(c, ctx, endpoint, resolution, attempted)
@@ -230,7 +259,7 @@ func (a *App) openStreamWithFailover(c *gin.Context, ctx context.Context, endpoi
 			err = prepareErr
 		}
 		if account.ID == "" {
-			if retry, recoveryErr := a.waitForCapacityRecovery(ctx, endpoint, started, attemptCount, a.recoveryAllowForResolution(resolution)); recoveryErr != nil {
+			if retry, recoveryErr := a.waitForCapacityRecovery(ctx, endpoint, rateLimitRecoveryStart(&started), attemptCount, a.recoveryAllowForResolution(resolution)); recoveryErr != nil {
 				return lastAccount, nil, nil, recoveryErr
 			} else if retry {
 				clear(attempted)
@@ -265,7 +294,7 @@ func (a *App) openStreamWithFailover(c *gin.Context, ctx context.Context, endpoi
 		lastErr = err
 		a.classifyUpstreamError(account.ID, err)
 		if (resolution.ExplicitPrevious || resolution.ImplicitResume) && isRateLimitCapacityFailure(err) {
-			if retry, recoveryErr := a.waitForCapacityRecovery(ctx, endpoint, started, attemptCount, a.recoveryAllowForResolution(resolution)); recoveryErr != nil {
+			if retry, recoveryErr := a.waitForCapacityRecovery(ctx, endpoint, rateLimitRecoveryStart(&started), attemptCount, a.recoveryAllowForResolution(resolution)); recoveryErr != nil {
 				return account, nil, nil, recoveryErr
 			} else if retry {
 				clear(attempted)
@@ -361,11 +390,12 @@ func requestUsesHostedWebSearch(request turn.NormalizedRequest) bool {
 }
 
 func (a *App) openHTTPStream(c *gin.Context, ctx context.Context, endpoint string, resolution *sessionResolution, attempted map[string]struct{}) (accounts.Record, eventStream, *accounts.QuotaSnapshot, error) {
-	account, err := a.acquireAccountForResolutionExcluding(ctx, resolution, attempted)
-	a.setRequestAccount(c, account)
+	lease, err := a.acquireLeaseForResolution(ctx, resolution, attempted)
 	if err != nil {
-		return account, nil, nil, err
+		return accounts.Record{}, nil, nil, err
 	}
+	account := lease.Account
+	a.setRequestAccount(c, account)
 	middleware.SetActivityModel(c, resolution.Request.Model)
 	request := resolution.Request.Request
 	a.logUpstreamPayload(c, endpoint, "http", account.ID, codex.StreamRequestPayload(request))
@@ -376,17 +406,19 @@ func (a *App) openHTTPStream(c *gin.Context, ctx context.Context, endpoint strin
 		stream, err = a.httpClient.StreamResponse(ctx, account, request, resolution.TurnState)
 	}
 	if err != nil {
+		lease.Release()
 		return account, nil, nil, err
 	}
-	return account, stream, codex.ParseQuotaFromHeaders(stream.Headers()), nil
+	return account, &leasedEventStream{eventStream: stream, release: lease.Release}, codex.ParseQuotaFromHeaders(stream.Headers()), nil
 }
 
 func (a *App) openWSStream(c *gin.Context, ctx context.Context, endpoint string, resolution *sessionResolution, attempted map[string]struct{}) (accounts.Record, eventStream, *accounts.QuotaSnapshot, error) {
-	account, err := a.acquireAccountForResolutionExcluding(ctx, resolution, attempted)
-	a.setRequestAccount(c, account)
+	lease, err := a.acquireLeaseForResolution(ctx, resolution, attempted)
 	if err != nil {
-		return account, nil, nil, err
+		return accounts.Record{}, nil, nil, err
 	}
+	account := lease.Account
+	a.setRequestAccount(c, account)
 	middleware.SetActivityModel(c, resolution.Request.Model)
 	headers := codex.BuildHeaders(account.Token.AccessToken, codex.HeaderOptions{
 		AccountID:   account.AccountID,
@@ -400,9 +432,74 @@ func (a *App) openWSStream(c *gin.Context, ctx context.Context, endpoint string,
 	wsEndpoint := websocketEndpoint(a.cfg.CodexBaseURL)
 	stream, err := a.connectResponsesWebSocket(ctx, wsEndpoint, headers, body)
 	if err != nil {
+		lease.Release()
 		return account, nil, nil, err
 	}
-	return account, stream, codex.ParseQuotaFromHeaders(stream.Headers()), nil
+	return account, &leasedEventStream{eventStream: stream, release: lease.Release}, codex.ParseQuotaFromHeaders(stream.Headers()), nil
+}
+
+func (a *App) acquireLeaseForResolution(ctx context.Context, resolution *sessionResolution, attempted map[string]struct{}) (*accountmanager.Lease, error) {
+	if resolution.ExplicitPrevious || resolution.ImplicitResume {
+		if resolution.PreferredAccountID == "" {
+			return nil, errContinuationAccountUnavailable
+		}
+		lease, err := a.accountMgr.AcquireSpecificLease(ctx, resolution.PreferredAccountID, false)
+		if err != nil {
+			return nil, errContinuationAccountUnavailable
+		}
+		if !a.modelCatalog().SupportsRecord(lease.Account, resolution.Request.Model) {
+			lease.Release()
+			return nil, errContinuationAccountUnavailable
+		}
+		return lease, nil
+	}
+	allow := func(record accounts.Record) bool {
+		if _, ok := attempted[record.ID]; ok {
+			return false
+		}
+		return strings.TrimSpace(resolution.Request.Model) == "" || a.modelCatalog().SupportsRecord(record, resolution.Request.Model)
+	}
+	if a.accounts.RotationStrategy() == accounts.RotationStickyThread && strings.TrimSpace(resolution.ConversationKey) != "" {
+		bound, ok, err := a.accounts.ThreadAffinity(resolution.ConversationKey, allow)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			return a.accountMgr.AcquireSpecificLease(ctx, bound.ID, true)
+		}
+	}
+	lease, err := a.accountMgr.AcquireMatchingLease(ctx, resolution.PreferredAccountID, allow)
+	if err != nil {
+		return nil, err
+	}
+	if !resolution.Request.ModelExplicit && strings.TrimSpace(resolution.Request.Model) == "" {
+		modelID := a.modelCatalog().ResolveDefaultForRecord(lease.Account, a.cfg.DefaultModel)
+		if strings.TrimSpace(modelID) == "" {
+			lease.Release()
+			return nil, errContinuationAccountUnavailable
+		}
+		resolution.Request.Model = modelID
+		resolution.Original.Model = modelID
+		if key := strings.TrimSpace(resolution.Request.PromptCacheKey); key != "" {
+			resolution.ConversationKey = key
+		} else if key := conversation.Derive(resolution.Request.Request); key != "" {
+			resolution.ConversationKey = key
+			resolution.Request.PromptCacheKey = key
+			resolution.Original.PromptCacheKey = key
+		}
+	}
+	return lease, nil
+}
+
+// acquireAccountForResolutionExcluding is retained for internal callers and
+// tests that only need selection. Upstream request paths use the lease form.
+func (a *App) acquireAccountForResolutionExcluding(ctx context.Context, resolution *sessionResolution, attempted map[string]struct{}) (accounts.Record, error) {
+	lease, err := a.acquireLeaseForResolution(ctx, resolution, attempted)
+	if err != nil {
+		return accounts.Record{}, err
+	}
+	lease.Release()
+	return lease.Account, nil
 }
 
 func (a *App) collectEvents(ctx context.Context, account accounts.Record, normalized turn.NormalizedRequest, stream eventStream) (*turn.Accumulator, error) {
@@ -785,66 +882,6 @@ func writeResponsesStreamError(writer io.Writer, status int, message string) {
 		"message":         strings.TrimSpace(message),
 		"sequence_number": 0,
 	}))
-}
-
-func (a *App) acquireAccountForResolutionExcluding(ctx context.Context, resolution *sessionResolution, attempted map[string]struct{}) (accounts.Record, error) {
-	if resolution.ExplicitPrevious || resolution.ImplicitResume {
-		preferredID := strings.TrimSpace(resolution.PreferredAccountID)
-		if preferredID == "" {
-			return accounts.Record{}, errContinuationAccountUnavailable
-		}
-		record, err := a.accountMgr.EnsureReady(ctx, preferredID)
-		if err != nil {
-			return accounts.Record{}, errContinuationAccountUnavailable
-		}
-		if !a.modelCatalog().SupportsRecord(record, resolution.Request.Model) {
-			return accounts.Record{}, errContinuationAccountUnavailable
-		}
-		return record, nil
-	}
-	acquireReady := func(modelID string) (accounts.Record, error) {
-		acquire := func(preferredID string, allow func(accounts.Record) bool) (accounts.Record, error) {
-			if a.accounts.RotationStrategy() == accounts.RotationStickyThread && strings.TrimSpace(resolution.ConversationKey) != "" {
-				return a.accounts.AcquireThread(resolution.ConversationKey, preferredID, allow)
-			}
-			return a.accounts.AcquireMatching(preferredID, allow)
-		}
-		record, err := acquire(resolution.PreferredAccountID, func(record accounts.Record) bool {
-			if _, alreadyAttempted := attempted[record.ID]; alreadyAttempted {
-				return false
-			}
-			return strings.TrimSpace(modelID) == "" || a.modelCatalog().SupportsRecord(record, modelID)
-		})
-		if err != nil {
-			return accounts.Record{}, err
-		}
-		ready, err := a.accountMgr.EnsureReady(ctx, record.ID)
-		if err != nil {
-			return record, err
-		}
-		return ready, nil
-	}
-	if !resolution.Request.ModelExplicit && strings.TrimSpace(resolution.Request.Model) == "" {
-		record, err := acquireReady("")
-		if err != nil {
-			return accounts.Record{}, err
-		}
-		modelID := a.modelCatalog().ResolveDefaultForRecord(record, a.cfg.DefaultModel)
-		if strings.TrimSpace(modelID) == "" {
-			return accounts.Record{}, errContinuationAccountUnavailable
-		}
-		resolution.Request.Model = modelID
-		resolution.Original.Model = modelID
-		if key := strings.TrimSpace(resolution.Request.PromptCacheKey); key != "" {
-			resolution.ConversationKey = key
-		} else if key := conversation.Derive(resolution.Request.Request); key != "" {
-			resolution.ConversationKey = key
-			resolution.Request.PromptCacheKey = key
-			resolution.Original.PromptCacheKey = key
-		}
-		return record, nil
-	}
-	return acquireReady(resolution.Request.Model)
 }
 
 func (a *App) setRequestAccount(c *gin.Context, account accounts.Record) {
